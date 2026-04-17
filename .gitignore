@@ -1,0 +1,42 @@
+# Rust
+/target/
+
+# Node
+node_modules/
+
+# Generated types
+packages/kite-types/generated/
+
+# Environment
+.env
+.env.secrets
+.env.local
+.env.*.local
+
+# Next.js
+apps/web/.next/
+apps/web/out/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# SQLx offline mode
+.sqlx/
+.vercel
+kite-cli-bin
+.env*.local
+.worktrees/
+
+# Playwright
+apps/web/test-results/
+apps/web/playwright-report/
+apps/web/blob-report/
+apps/web/playwright/.clerk/

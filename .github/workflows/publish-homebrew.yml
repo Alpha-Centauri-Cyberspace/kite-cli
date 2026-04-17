@@ -1,0 +1,123 @@
+name: Publish Homebrew formula
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (e.g. v0.1.5)'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  update-formula:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve release tag
+        id: tag
+        run: |
+          set -euo pipefail
+          if [ -n "${{ github.event.inputs.tag || '' }}" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch release manifest from R2
+        id: manifest
+        env:
+          PUBLIC_BASE_URL: ${{ secrets.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          BASE_URL="${PUBLIC_BASE_URL%/}"
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsSL "${BASE_URL}/releases/${RELEASE_TAG}/manifest.json" -o manifest.json; then
+              break
+            fi
+            echo "manifest not available yet (attempt ${attempt}); retrying..."
+            sleep 10
+          done
+          if [ ! -s manifest.json ]; then
+            echo "::error::failed to fetch manifest for ${RELEASE_TAG}"
+            exit 1
+          fi
+          jq . manifest.json
+          darwin_url="$(jq -r '.assets[] | select(.name == "kite-darwin-arm64.tar.gz") | .download_url' manifest.json)"
+          darwin_sha="$(jq -r '.assets[] | select(.name == "kite-darwin-arm64.tar.gz") | .sha256'       manifest.json)"
+          linux_url="$(jq -r '.assets[] | select(.name == "kite-linux-x86_64.tar.gz")  | .download_url' manifest.json)"
+          linux_sha="$(jq -r '.assets[] | select(.name == "kite-linux-x86_64.tar.gz")  | .sha256'       manifest.json)"
+          version="${RELEASE_TAG#v}"
+          echo "version=${version}"       >> "$GITHUB_OUTPUT"
+          echo "darwin_url=${darwin_url}" >> "$GITHUB_OUTPUT"
+          echo "darwin_sha=${darwin_sha}" >> "$GITHUB_OUTPUT"
+          echo "linux_url=${linux_url}"   >> "$GITHUB_OUTPUT"
+          echo "linux_sha=${linux_sha}"   >> "$GITHUB_OUTPUT"
+
+      - name: Check out homebrew-kite
+        uses: actions/checkout@v4
+        with:
+          repository: Alpha-Centauri-Cyberspace/homebrew-kite
+          token: ${{ secrets.HOMEBREW_TAP_BOT_TOKEN }}
+          path: homebrew-kite
+
+      - name: Render formula
+        env:
+          VERSION:    ${{ steps.manifest.outputs.version }}
+          DARWIN_URL: ${{ steps.manifest.outputs.darwin_url }}
+          DARWIN_SHA: ${{ steps.manifest.outputs.darwin_sha }}
+          LINUX_URL:  ${{ steps.manifest.outputs.linux_url }}
+          LINUX_SHA:  ${{ steps.manifest.outputs.linux_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p homebrew-kite/Formula
+          cat > homebrew-kite/Formula/kite.rb <<RUBY
+          class Kite < Formula
+            desc "Universal webhook adapter CLI"
+            homepage "https://github.com/Alpha-Centauri-Cyberspace/kite-cli"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "${DARWIN_URL}"
+                sha256 "${DARWIN_SHA}"
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "${LINUX_URL}"
+                sha256 "${LINUX_SHA}"
+              end
+            end
+
+            def install
+              bin.install "kite"
+            end
+
+            test do
+              assert_match "kite", shell_output("#{bin}/kite --version")
+            end
+          end
+          RUBY
+          cat homebrew-kite/Formula/kite.rb
+
+      - name: Commit and push formula update
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd homebrew-kite
+          git config user.name  "kite-release-bot"
+          git config user.email "kite-release-bot@users.noreply.github.com"
+          if git diff --quiet Formula/kite.rb; then
+            echo "No formula changes; nothing to commit."
+            exit 0
+          fi
+          git add Formula/kite.rb
+          git commit -m "kite ${RELEASE_TAG}"
+          git push origin HEAD
