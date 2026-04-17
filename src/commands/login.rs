@@ -165,9 +165,18 @@ mod tests {
     #[test]
     fn sanitize_url_strips_all_whitespace_variants() {
         // Spaces, tabs, CR, LF that a careless copy/paste could introduce.
-        assert_eq!(sanitize_url(" https://example.com/path "), "https://example.com/path");
-        assert_eq!(sanitize_url("https://example.com\t/path\n"), "https://example.com/path");
-        assert_eq!(sanitize_url("https://example.com /path\r\n"), "https://example.com/path");
+        assert_eq!(
+            sanitize_url(" https://example.com/path "),
+            "https://example.com/path"
+        );
+        assert_eq!(
+            sanitize_url("https://example.com\t/path\n"),
+            "https://example.com/path"
+        );
+        assert_eq!(
+            sanitize_url("https://example.com /path\r\n"),
+            "https://example.com/path"
+        );
     }
 
     #[test]
@@ -178,30 +187,48 @@ mod tests {
 
     #[test]
     fn derive_ws_url_converts_https_to_wss() {
-        assert_eq!(derive_ws_url("https://api.getkite.sh"), "wss://api.getkite.sh/ws");
+        assert_eq!(
+            derive_ws_url("https://api.getkite.sh"),
+            "wss://api.getkite.sh/ws"
+        );
     }
 
     #[test]
     fn derive_ws_url_converts_http_to_ws() {
-        assert_eq!(derive_ws_url("http://localhost:3000"), "ws://localhost:3000/ws");
+        assert_eq!(
+            derive_ws_url("http://localhost:3000"),
+            "ws://localhost:3000/ws"
+        );
     }
 
     #[test]
     fn derive_ws_url_preserves_existing_ws_suffix() {
         // If the server URL already ends with /ws, don't double-append.
-        assert_eq!(derive_ws_url("https://api.getkite.sh/ws"), "wss://api.getkite.sh/ws");
+        assert_eq!(
+            derive_ws_url("https://api.getkite.sh/ws"),
+            "wss://api.getkite.sh/ws"
+        );
     }
 
     #[test]
     fn derive_ws_url_strips_trailing_slashes_before_appending() {
-        assert_eq!(derive_ws_url("https://api.getkite.sh/"), "wss://api.getkite.sh/ws");
-        assert_eq!(derive_ws_url("https://api.getkite.sh///"), "wss://api.getkite.sh/ws");
+        assert_eq!(
+            derive_ws_url("https://api.getkite.sh/"),
+            "wss://api.getkite.sh/ws"
+        );
+        assert_eq!(
+            derive_ws_url("https://api.getkite.sh///"),
+            "wss://api.getkite.sh/ws"
+        );
     }
 
     #[test]
     fn derive_ws_url_strips_whitespace_before_converting() {
         // sanitize_url is called first, so whitespace in the source URL doesn't
         // leak into the derived WebSocket URL.
-        assert_eq!(derive_ws_url("  https://api.getkite.sh\n"), "wss://api.getkite.sh/ws");
+        assert_eq!(
+            derive_ws_url("  https://api.getkite.sh\n"),
+            "wss://api.getkite.sh/ws"
+        );
     }
 }

@@ -49,7 +49,10 @@ async fn device_code_request_shape_matches_cli_expectation() {
     // device_code in response" before even showing the user code.
     assert!(body["device_code"].is_string(), "device_code missing");
     assert!(body["user_code"].is_string(), "user_code missing");
-    assert!(body["verification_url"].is_string(), "verification_url missing");
+    assert!(
+        body["verification_url"].is_string(),
+        "verification_url missing"
+    );
     assert!(body["ws_url"].is_string(), "ws_url missing");
     assert!(body["interval"].is_u64(), "interval missing or wrong type");
 }
