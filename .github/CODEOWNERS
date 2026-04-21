@@ -1,0 +1,3 @@
+# Default code owners for every file in the repository.
+# Pull requests against main require review from at least one listed owner.
+* @lommaj @lommaj-ai
