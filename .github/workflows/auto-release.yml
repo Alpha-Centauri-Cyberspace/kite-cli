@@ -120,8 +120,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Pinned to ubuntu-22.04 (GLIBC 2.35) so the published binary runs on
+          # Ubuntu 22.04+, Debian 12+, RHEL 9+, etc. ubuntu-latest builds against
+          # GLIBC 2.39, which excludes most LTS distros still in support.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             name: kite-linux-x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
