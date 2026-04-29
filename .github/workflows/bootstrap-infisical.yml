@@ -1,0 +1,100 @@
+name: Bootstrap Infisical from existing GH secrets
+
+# One-shot workflow: copies kite-cli's GH Actions secrets into the Infisical
+# Infrastructure project so the native GH sync can take over.
+# Delete this file after a successful run.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type BOOTSTRAP to confirm'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    if: ${{ inputs.confirm == 'BOOTSTRAP' }}
+    runs-on: ubuntu-latest
+    env:
+      INFISICAL_DOMAIN: https://infisical.thesprawl.dev:18443
+      INFISICAL_PROJECT_ID: b95a7452-1dcf-482b-b69b-f19ca5c18874
+      INFISICAL_ENV: prod
+
+    steps:
+      - name: Install Infisical CLI
+        run: |
+          curl -1sLf 'https://artifacts-cli.infisical.com/setup.deb.sh' | sudo -E bash
+          sudo apt-get install -y infisical
+          infisical --version
+
+      - name: Login with machine identity
+        id: login
+        env:
+          CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        run: |
+          TOKEN=$(infisical login \
+            --method=universal-auth \
+            --client-id="$CLIENT_ID" \
+            --client-secret="$CLIENT_SECRET" \
+            --domain="$INFISICAL_DOMAIN" \
+            --plain --silent)
+          if [ -z "$TOKEN" ]; then
+            echo "::error::infisical login returned empty token"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Push secrets to Infisical
+        env:
+          INFISICAL_TOKEN: ${{ steps.login.outputs.token }}
+          CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
+          CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          CLOUDFLARE_R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
+          CLOUDFLARE_R2_PUBLIC_BASE_URL: ${{ secrets.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
+          HOMEBREW_TAP_BOT_TOKEN: ${{ secrets.HOMEBREW_TAP_BOT_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          KEYS=(
+            CLOUDFLARE_R2_ACCOUNT_ID
+            CLOUDFLARE_R2_ACCESS_KEY_ID
+            CLOUDFLARE_R2_SECRET_ACCESS_KEY
+            CLOUDFLARE_R2_BUCKET
+            CLOUDFLARE_R2_PUBLIC_BASE_URL
+            HOMEBREW_TAP_BOT_TOKEN
+          )
+
+          ok=0; fail=0; empty=0
+
+          for key in "${KEYS[@]}"; do
+            value="${!key:-}"
+            if [ -z "$value" ]; then
+              echo "::warning::$key is empty in GH — skipping"
+              empty=$((empty+1))
+              continue
+            fi
+
+            if infisical secrets set "$key=$value" \
+                --token="$INFISICAL_TOKEN" \
+                --projectId="$INFISICAL_PROJECT_ID" \
+                --env="$INFISICAL_ENV" \
+                --path=/ \
+                --domain="$INFISICAL_DOMAIN" >/dev/null 2>&1; then
+              echo "ok  $key"
+              ok=$((ok+1))
+            else
+              echo "::error::failed to set $key"
+              fail=$((fail+1))
+            fi
+          done
+
+          echo ""
+          echo "==> ok=$ok fail=$fail empty=$empty / total=${#KEYS[@]}"
+          [ "$fail" -eq 0 ]
