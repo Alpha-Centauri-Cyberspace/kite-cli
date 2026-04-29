@@ -1,8 +1,9 @@
 name: Bootstrap Infisical from existing GH secrets
 
-# One-shot workflow: copies kite-cli's GH Actions secrets into the Infisical
-# Infrastructure project so the native GH sync can take over.
-# Delete this file after a successful run.
+# One-shot workflow: base64-encodes kite-cli's GH Actions secrets into a JSON
+# artifact for local import to the Infisical Infrastructure project.
+# Runner never contacts Infisical (private LAN unreachable from github.com).
+# Delete this file after the local import succeeds.
 
 on:
   workflow_dispatch:
@@ -19,40 +20,10 @@ jobs:
   bootstrap:
     if: ${{ inputs.confirm == 'BOOTSTRAP' }}
     runs-on: ubuntu-latest
-    env:
-      INFISICAL_DOMAIN: https://infisical.thesprawl.dev:18443
-      INFISICAL_PROJECT_ID: b95a7452-1dcf-482b-b69b-f19ca5c18874
-      INFISICAL_ENV: prod
 
     steps:
-      - name: Install Infisical CLI
-        run: |
-          curl -1sLf 'https://artifacts-cli.infisical.com/setup.deb.sh' | sudo -E bash
-          sudo apt-get install -y infisical
-          infisical --version
-
-      - name: Login with machine identity
-        id: login
+      - name: Dump secrets as base64 JSON
         env:
-          CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
-          CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
-        run: |
-          TOKEN=$(infisical login \
-            --method=universal-auth \
-            --client-id="$CLIENT_ID" \
-            --client-secret="$CLIENT_SECRET" \
-            --domain="$INFISICAL_DOMAIN" \
-            --plain --silent)
-          if [ -z "$TOKEN" ]; then
-            echo "::error::infisical login returned empty token"
-            exit 1
-          fi
-          echo "::add-mask::$TOKEN"
-          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
-
-      - name: Push secrets to Infisical
-        env:
-          INFISICAL_TOKEN: ${{ steps.login.outputs.token }}
           CLOUDFLARE_R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
           CLOUDFLARE_R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
           CLOUDFLARE_R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
@@ -71,30 +42,34 @@ jobs:
             HOMEBREW_TAP_BOT_TOKEN
           )
 
-          ok=0; fail=0; empty=0
+          out=secrets.json
+          printf '{' > "$out"
+          first=1
+          present=0
+          empty=0
 
           for key in "${KEYS[@]}"; do
             value="${!key:-}"
             if [ -z "$value" ]; then
-              echo "::warning::$key is empty in GH — skipping"
               empty=$((empty+1))
               continue
             fi
-
-            if infisical secrets set "$key=$value" \
-                --token="$INFISICAL_TOKEN" \
-                --projectId="$INFISICAL_PROJECT_ID" \
-                --env="$INFISICAL_ENV" \
-                --path=/ \
-                --domain="$INFISICAL_DOMAIN" >/dev/null 2>&1; then
-              echo "ok  $key"
-              ok=$((ok+1))
-            else
-              echo "::error::failed to set $key"
-              fail=$((fail+1))
-            fi
+            b64=$(printf '%s' "$value" | base64 -w 0)
+            if [ $first -eq 0 ]; then printf ',' >> "$out"; fi
+            printf '"%s":"%s"' "$key" "$b64" >> "$out"
+            first=0
+            present=$((present+1))
           done
+          printf '}' >> "$out"
 
+          echo "Keys written to artifact:"
+          jq -r 'keys[]' < "$out" | sort
           echo ""
-          echo "==> ok=$ok fail=$fail empty=$empty / total=${#KEYS[@]}"
-          [ "$fail" -eq 0 ]
+          echo "==> present=$present empty=$empty / total=${#KEYS[@]}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: infisical-bootstrap-secrets
+          path: secrets.json
+          retention-days: 1
