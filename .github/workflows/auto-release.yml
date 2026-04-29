@@ -29,7 +29,7 @@ jobs:
   # Step 1: Create or resolve the release tag
   auto-tag:
     name: Resolve release tag
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2204
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       release_created: ${{ steps.tag.outputs.release_created }}
@@ -120,8 +120,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux build runs on Blacksmith jammy (Ubuntu 22.04, GLIBC 2.35) —
+          # matches kite-server's CI runner pool and keeps the published binary
+          # runnable on Ubuntu 22.04+, Debian 12+, RHEL 9+. Building on
+          # ubuntu-latest (now 24.04 / GLIBC 2.39) excludes most LTS distros.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: blacksmith-2vcpu-ubuntu-2204
             name: kite-linux-x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
@@ -142,6 +146,35 @@ jobs:
           export KITE_VERSION="${KITE_VERSION#v}"
           cargo build --release --target ${{ matrix.target }} -p kite-cli
 
+      # Guard against the regression that broke v0.1.2 on Ubuntu 22.04: if the
+      # build toolchain bumps and the binary's max required GLIBC creeps above
+      # the floor we promise users, fail the release loudly instead of shipping
+      # something that won't start on most LTS distros.
+      - name: Verify Linux GLIBC floor
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        env:
+          KITE_GLIBC_FLOOR: "2.35"
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release/kite"
+          MAX_GLIBC="$(strings "$BIN" | grep -oE '^GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -n1 || true)"
+          if [ -z "$MAX_GLIBC" ]; then
+            echo "::error::No GLIBC_* symbols found in $BIN — unexpected on a glibc target."
+            exit 1
+          fi
+          MAX_VER="${MAX_GLIBC#GLIBC_}"
+          echo "max required: GLIBC_${MAX_VER}; floor: GLIBC_${KITE_GLIBC_FLOOR}"
+          # printf | sort -V picks the highest of (floor, actual). If actual wins,
+          # the binary requires a newer glibc than the floor allows.
+          HIGHEST="$(printf '%s\n%s\n' "$KITE_GLIBC_FLOOR" "$MAX_VER" | sort -V | tail -n1)"
+          if [ "$HIGHEST" != "$KITE_GLIBC_FLOOR" ]; then
+            echo "::error::Binary requires GLIBC_${MAX_VER}, above the GLIBC_${KITE_GLIBC_FLOOR} floor."
+            echo "::error::This binary will fail on Ubuntu 22.04 / Debian 12 / RHEL 9."
+            echo "::error::Either pin the build runner to an older image, switch to a static MUSL target,"
+            echo "::error::or raise KITE_GLIBC_FLOOR if the new floor is acceptable."
+            exit 1
+          fi
+
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
@@ -161,7 +194,7 @@ jobs:
   release:
     name: Publish release
     needs: [auto-tag, build]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2204
 
     steps:
       - uses: actions/checkout@v4
