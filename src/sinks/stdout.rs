@@ -1,3 +1,5 @@
+use std::io::Write;
+
 use anyhow::Result;
 use cloudevents::AttributesReader;
 use cloudevents::Event;
@@ -35,14 +37,20 @@ impl Sink for StdoutSink {
     }
 
     async fn handle(&mut self, event: &Event) -> Result<SinkResult> {
+        // Flush after each event so downstream pipes (test harnesses, log
+        // shippers, `tee`) observe events in real time. Rust block-buffers
+        // stdout when it's a pipe — without this, low-volume streams sit in
+        // the buffer indefinitely.
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
         match self.mode {
             OutputMode::Json => {
                 let json = serde_json::to_string(event)?;
-                println!("{json}");
+                writeln!(out, "{json}")?;
             }
             OutputMode::Compact => {
                 let summary = get_kitesummary(event).unwrap_or_else(|| event.ty().to_string());
-                println!("{summary}");
+                writeln!(out, "{summary}")?;
             }
             OutputMode::Pretty => {
                 let now = chrono::Local::now().format("%H:%M:%S");
@@ -52,9 +60,10 @@ impl Sink for StdoutSink {
                     .map(|s| format!("#{s}"))
                     .unwrap_or_default();
 
-                println!("[{now}] {seq} {event_type}  {summary}");
+                writeln!(out, "[{now}] {seq} {event_type}  {summary}")?;
             }
         }
+        out.flush()?;
 
         Ok(SinkResult::Ok)
     }
