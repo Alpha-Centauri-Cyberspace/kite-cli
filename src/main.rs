@@ -476,8 +476,10 @@ async fn main() -> anyhow::Result<()> {
             client_id,
             importance,
         } => {
-            commands::stream::run(source, event_type, json, compact, exec, client_id, importance)
-                .await?;
+            commands::stream::run(
+                source, event_type, json, compact, exec, client_id, importance,
+            )
+            .await?;
         }
         Commands::Proxy {
             source,

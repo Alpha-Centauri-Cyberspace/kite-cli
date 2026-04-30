@@ -57,15 +57,7 @@ pub async fn listen(as_id: Option<String>, json_mode: bool) -> Result<()> {
     let max_backoff = 30u64;
 
     loop {
-        match ws_client::connect(
-            &ws_url,
-            &api_key,
-            &team_id,
-            vec![scope.clone()],
-            None,
-        )
-        .await
-        {
+        match ws_client::connect(&ws_url, &api_key, &team_id, vec![scope.clone()], None).await {
             Ok((_sink_ws, stream, last_seq, _client_id)) => {
                 backoff = 1;
                 eprintln!("Connected (last_seq: {last_seq})");
