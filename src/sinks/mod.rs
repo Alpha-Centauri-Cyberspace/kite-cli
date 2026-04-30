@@ -1,5 +1,4 @@
 pub mod exec;
-pub mod kite;
 pub mod mcp;
 pub mod paperclip;
 pub mod proxy;

@@ -35,6 +35,7 @@ Commands:
   status     Show dashboard-equivalent status summary
   update     Update the installed kite binary
   queue      Inspect and manage the local event queue
+  agent      Send and receive agent-to-agent messages on Kite Cloud
   help       Print this message or the help of the given subcommand(s)
 
 Options:
@@ -78,9 +79,6 @@ Options:
       --exec <EXEC>               Execute a command for each event, passing event JSON on stdin
       --client-id <CLIENT_ID>     Persistent client ID for delivery cursor tracking
       --importance <IMPORTANCE>   Minimum importance level to deliver (low, normal, high, critical)
-      --federation-target <URL>   Forward received events to another Kite instance (P2P federation). Value: full hook URL e.g. https://kite.example.com/hooks/<team_id>/kite NOTE: for production use, prefer server-side federation (--help for details)
-      --federation-token <TOKEN>  Bearer token for authenticating with the federation target
-      --instance-id <ID>          This instance's stable identifier for federation provenance tracking (defaults to a random UUID if not set)
   -h, --help                      Print help
   -V, --version                   Print version
 ```
@@ -480,5 +478,69 @@ Options:
       --server <SERVER>  Override update server base URL
   -h, --help             Print help
   -V, --version          Print version
+```
+
+## `kite agent`
+
+```text
+Send and receive agent-to-agent messages on Kite Cloud
+
+Usage: kite agent <COMMAND>
+
+Commands:
+  register  Register a stable agent identity on this machine
+  listen    Listen for `com.kite.agent.message` events addressed to this agent
+  send      Send an agent message to another agent on the same team
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+## `kite agent register`
+
+```text
+Register a stable agent identity on this machine
+
+Usage: kite agent register [OPTIONS]
+
+Options:
+      --name <NAME>  Optional friendly name (slugged into the agent id)
+  -h, --help         Print help
+  -V, --version      Print version
+```
+
+## `kite agent listen`
+
+```text
+Listen for `com.kite.agent.message` events addressed to this agent
+
+Usage: kite agent listen [OPTIONS]
+
+Options:
+      --as-id <AGENT_ID>  Override the agent id to listen as (defaults to the registered id)
+      --json              Print full CloudEvent JSON per line instead of a one-line summary
+  -h, --help              Print help
+  -V, --version           Print version
+```
+
+## `kite agent send`
+
+```text
+Send an agent message to another agent on the same team
+
+Usage: kite agent send [OPTIONS] --to <AGENT_ID> <BODY>
+
+Arguments:
+  <BODY>  Message body
+
+Options:
+      --to <AGENT_ID>          Recipient agent id
+      --from <AGENT_ID>        Sender agent id (defaults to the registered id on this machine)
+      --thread <THREAD_ID>     Optional thread id for grouping replies
+      --reply-to <EVENT_ID>    Optional event id this message replies to
+  -h, --help                   Print help
+  -V, --version                Print version
 ```
 
