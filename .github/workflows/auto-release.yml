@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to release (e.g. v0.1.5). Leave empty to auto-create next tag.'
+        description: 'Existing tag to release (e.g. v0.2.0). Leave empty to read the version from Cargo.toml.'
         required: false
 
 permissions:
@@ -44,7 +44,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          # If manual trigger with explicit tag, use it directly
+          # If manual trigger with explicit tag, use it directly.
           if [ -n "${{ github.event.inputs.tag || '' }}" ]; then
             echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
             echo "release_created=true" >> "$GITHUB_OUTPUT"
@@ -52,56 +52,66 @@ jobs:
             exit 0
           fi
 
+          # Read the version from Cargo.toml — this is the source of truth.
+          # Bumping Cargo.toml is what authors use to cut a release; the
+          # workflow does not auto-bump, because that hides minor/major
+          # bumps and silently advances on commits that shouldn't release.
+          version="$(awk -F'"' '/^version[[:space:]]*=/ { print $2; exit }' Cargo.toml)"
+          if [ -z "$version" ]; then
+            echo "::error::Could not parse 'version = \"...\"' from Cargo.toml"
+            exit 1
+          fi
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Cargo.toml version '$version' is not a clean semver (X.Y.Z)"
+            exit 1
+          fi
+
+          target_tag="v${version}"
+          echo "Cargo.toml version: ${version} → target tag: ${target_tag}"
+
           git fetch --force --tags origin
 
-          existing_tag="$(git tag --points-at "$GITHUB_SHA" --list 'v0.1.*' --sort=-v:refname | tail -n1 || true)"
+          # Already tagged on this exact commit? Nothing to do.
+          existing_tag="$(git tag --points-at "$GITHUB_SHA" --list "$target_tag" || true)"
           if [ -n "$existing_tag" ]; then
             echo "release_created=false" >> "$GITHUB_OUTPUT"
             echo "tag=${existing_tag}" >> "$GITHUB_OUTPUT"
-            echo "Commit already tagged (${existing_tag}); skipping."
+            echo "Commit already tagged ${existing_tag}; skipping."
             exit 0
+          fi
+
+          # Tag exists on a *different* commit? Author forgot to bump
+          # Cargo.toml. Fail loudly so we don't silently re-publish.
+          if git ls-remote --exit-code --tags origin "refs/tags/${target_tag}" >/dev/null 2>&1; then
+            echo "::error::Tag ${target_tag} already exists on a different commit."
+            echo "::error::Bump 'version' in Cargo.toml before merging to main."
+            exit 1
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          for attempt in 1 2 3 4 5; do
-            latest_tag="$(git tag -l 'v0.1.*' --sort=-v:refname | head -n1 || true)"
-            if [ -z "$latest_tag" ]; then
-              latest_tag="v0.1.0"
-            fi
+          git tag -a "$target_tag" "$GITHUB_SHA" -m "chore(release): ${target_tag}"
 
-            if [[ ! "$latest_tag" =~ ^v0\.1\.([0-9]+)$ ]]; then
-              echo "::error::Latest tag '$latest_tag' is not in expected v0.1.x format"
-              exit 1
-            fi
+          if git push origin "refs/tags/${target_tag}"; then
+            echo "release_created=true" >> "$GITHUB_OUTPUT"
+            echo "tag=${target_tag}" >> "$GITHUB_OUTPUT"
+            echo "Created and pushed ${target_tag}."
+            exit 0
+          fi
 
-            next_patch="$((BASH_REMATCH[1] + 1))"
-            next_tag="v0.1.${next_patch}"
+          # Push race: another concurrent run created the same tag.
+          git tag -d "$target_tag" >/dev/null 2>&1 || true
+          git fetch --force --tags origin
+          if git ls-remote --exit-code --tags origin "refs/tags/${target_tag}" >/dev/null 2>&1; then
+            echo "Detected concurrent creation of ${target_tag}; treating as no-op."
+            echo "release_created=false" >> "$GITHUB_OUTPUT"
+            echo "tag=${target_tag}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-            git tag -d "$next_tag" >/dev/null 2>&1 || true
-            git tag -a "$next_tag" "$GITHUB_SHA" -m "chore(release): ${next_tag}"
-
-            if git push origin "refs/tags/${next_tag}"; then
-              echo "release_created=true" >> "$GITHUB_OUTPUT"
-              echo "tag=${next_tag}" >> "$GITHUB_OUTPUT"
-              echo "Created and pushed ${next_tag}."
-              exit 0
-            fi
-
-            git tag -d "$next_tag" >/dev/null 2>&1 || true
-            git fetch --force --tags origin
-
-            if git ls-remote --exit-code --tags origin "refs/tags/${next_tag}" >/dev/null 2>&1; then
-              echo "Detected concurrent creation of ${next_tag} on attempt ${attempt}; retrying."
-              continue
-            fi
-
-            echo "::error::Failed to push ${next_tag} for a non-race reason"
-            exit 1
-          done
-
-          echo "::error::Unable to allocate a unique v0.1.x tag after retries"
+          echo "::error::Failed to push ${target_tag} for a non-race reason"
           exit 1
 
       - name: Summary
