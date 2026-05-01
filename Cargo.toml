@@ -1,6 +1,6 @@
 [package]
 name = "kite-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 description = "Universal webhook adapter CLI — stream, proxy, and replay events through the Kite delivery network."

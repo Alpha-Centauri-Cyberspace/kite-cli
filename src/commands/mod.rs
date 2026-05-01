@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod endpoints;
 pub mod export;
 pub mod github;

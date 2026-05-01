@@ -11,6 +11,18 @@ pub struct KiteConfig {
     pub auth: AuthConfig,
     #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfig {
+    /// Stable identifier the local agent uses as its CloudEvent `from` and as
+    /// the scope for incoming `agent_to:<id>` subscriptions.
+    pub id: String,
+    /// Optional human-readable label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

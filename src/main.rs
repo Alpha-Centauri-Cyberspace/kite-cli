@@ -124,18 +124,6 @@ enum Commands {
         /// Minimum importance level to deliver (low, normal, high, critical)
         #[arg(long)]
         importance: Option<String>,
-        /// Forward received events to another Kite instance (P2P federation).
-        /// Value: full hook URL e.g. https://kite.example.com/hooks/<team_id>/kite
-        /// NOTE: for production use, prefer server-side federation (--help for details).
-        #[arg(long, value_name = "URL")]
-        federation_target: Option<String>,
-        /// Bearer token for authenticating with the federation target
-        #[arg(long, value_name = "TOKEN")]
-        federation_token: Option<String>,
-        /// This instance's stable identifier for federation provenance tracking
-        /// (defaults to a random UUID if not set)
-        #[arg(long, value_name = "ID")]
-        instance_id: Option<String>,
     },
     /// Proxy webhook events to a local HTTP server
     #[command(after_help = PROXY_AFTER_HELP)]
@@ -227,6 +215,47 @@ enum Commands {
     Queue {
         #[command(subcommand)]
         command: QueueCommand,
+    },
+    /// Send and receive agent-to-agent messages on Kite Cloud
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentCommand {
+    /// Register a stable agent identity on this machine
+    Register {
+        /// Optional friendly name (slugged into the agent id)
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Listen for `com.kite.agent.message` events addressed to this agent
+    Listen {
+        /// Override the agent id to listen as (defaults to the registered id)
+        #[arg(long, value_name = "AGENT_ID")]
+        as_id: Option<String>,
+        /// Print full CloudEvent JSON per line instead of a one-line summary
+        #[arg(long)]
+        json: bool,
+    },
+    /// Send an agent message to another agent on the same team
+    Send {
+        /// Recipient agent id
+        #[arg(long, value_name = "AGENT_ID")]
+        to: String,
+        /// Sender agent id (defaults to the registered id on this machine)
+        #[arg(long, value_name = "AGENT_ID")]
+        from: Option<String>,
+        /// Optional thread id for grouping replies
+        #[arg(long, value_name = "THREAD_ID")]
+        thread: Option<String>,
+        /// Optional event id this message replies to
+        #[arg(long, value_name = "EVENT_ID")]
+        reply_to: Option<String>,
+        /// Message body
+        body: String,
     },
 }
 
@@ -446,21 +475,9 @@ async fn main() -> anyhow::Result<()> {
             exec,
             client_id,
             importance,
-            federation_target,
-            federation_token,
-            instance_id,
         } => {
             commands::stream::run(
-                source,
-                event_type,
-                json,
-                compact,
-                exec,
-                client_id,
-                importance,
-                federation_target,
-                federation_token,
-                instance_id,
+                source, event_type, json, compact, exec, client_id, importance,
             )
             .await?;
         }
@@ -600,6 +617,23 @@ async fn main() -> anyhow::Result<()> {
             }
             QueueCommand::Stats => {
                 commands::queue::stats()?;
+            }
+        },
+        Commands::Agent { command } => match command {
+            AgentCommand::Register { name } => {
+                commands::agent::register(name)?;
+            }
+            AgentCommand::Listen { as_id, json } => {
+                commands::agent::listen(as_id, json).await?;
+            }
+            AgentCommand::Send {
+                to,
+                from,
+                thread,
+                reply_to,
+                body,
+            } => {
+                commands::agent::send(to, body, from, thread, reply_to).await?;
             }
         },
     }
