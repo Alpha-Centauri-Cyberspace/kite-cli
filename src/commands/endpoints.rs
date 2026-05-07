@@ -1,4 +1,6 @@
-use anyhow::Result;
+use std::io::{self, Read};
+
+use anyhow::{Context, Result};
 
 use crate::commands::rpc;
 use crate::commands::rpc::ApiPermission;
@@ -46,9 +48,42 @@ pub async fn create(
     events: Option<Vec<String>>,
     force: bool,
     github_token: Option<String>,
+    signing_secret: Option<String>,
 ) -> Result<()> {
     rpc::ensure_permission(ApiPermission::Write, "kite endpoints create").await?;
-    let payload = rpc::call("hooks.create", serde_json::json!({ "source": source })).await?;
+
+    let resolved_secret = match signing_secret.as_deref() {
+        Some("-") => {
+            let mut buf = String::new();
+            io::stdin()
+                .read_to_string(&mut buf)
+                .context("failed to read signing secret from stdin")?;
+            let trimmed = buf.trim().to_string();
+            if trimmed.is_empty() {
+                anyhow::bail!("--signing-secret - was provided but stdin was empty");
+            }
+            Some(trimmed)
+        }
+        Some(other) => {
+            let trimmed = other.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
+        }
+        None => None,
+    };
+
+    let mut params = serde_json::Map::new();
+    params.insert("source".to_string(), serde_json::Value::String(source.clone()));
+    if let Some(secret) = resolved_secret.as_ref() {
+        params.insert(
+            "webhook_secret".to_string(),
+            serde_json::Value::String(secret.clone()),
+        );
+    }
+    let payload = rpc::call("hooks.create", serde_json::Value::Object(params)).await?;
     let endpoint = payload
         .get("endpoint")
         .and_then(|v| v.as_str())
@@ -124,10 +159,25 @@ pub async fn create(
         }
     }
 
+    let webhook_secret_configured = payload
+        .get("webhook_secret_configured")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     println!("Created endpoint:");
     println!("- id: {id}");
     println!("- webhook_url: {full_url}");
     println!("- hook_token (shown once): {hook_token}");
+    if resolved_secret.is_some() {
+        println!(
+            "- signing_secret: {}",
+            if webhook_secret_configured {
+                "stored (signature verification enabled)"
+            } else {
+                "WARNING: server did not confirm storage"
+            }
+        );
+    }
 
     if let Some(secret) = &github_webhook_secret {
         println!();

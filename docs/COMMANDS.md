@@ -266,13 +266,14 @@ Create or rotate endpoint credentials for a source (GitHub includes a one-time w
 Usage: kite endpoints create [OPTIONS] --source <SOURCE>
 
 Options:
-      --source <SOURCE>              Source name (e.g. github, stripe)
-      --repo <REPO>                  GitHub repo (owner/name) — auto-registers webhook via GitHub API
-      --events <EVENTS>              Webhook events to subscribe to (comma-separated, default: push,pull_request,issues)
-      --force                        Replace existing webhook on the repo
-      --github-token <GITHUB_TOKEN>  GitHub personal access token (falls back to GITHUB_TOKEN env or gh CLI)
-  -h, --help                         Print help
-  -V, --version                      Print version
+      --source <SOURCE>                  Source name (e.g. github, stripe)
+      --repo <REPO>                      GitHub repo (owner/name) — auto-registers webhook via GitHub API
+      --events <EVENTS>                  Webhook events to subscribe to (comma-separated, default: push,pull_request,issues)
+      --force                            Replace existing webhook on the repo
+      --github-token <GITHUB_TOKEN>      GitHub personal access token (falls back to GITHUB_TOKEN env or gh CLI)
+      --signing-secret <SIGNING_SECRET>  Provider-issued signing secret (e.g. Linear's lin_wh_…). Use `-` to read from stdin
+  -h, --help                             Print help
+  -V, --version                          Print version
 ```
 
 ## `kite endpoints deactivate`
