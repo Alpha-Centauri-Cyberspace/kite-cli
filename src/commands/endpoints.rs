@@ -76,7 +76,10 @@ pub async fn create(
     };
 
     let mut params = serde_json::Map::new();
-    params.insert("source".to_string(), serde_json::Value::String(source.clone()));
+    params.insert(
+        "source".to_string(),
+        serde_json::Value::String(source.clone()),
+    );
     if let Some(secret) = resolved_secret.as_ref() {
         params.insert(
             "webhook_secret".to_string(),
