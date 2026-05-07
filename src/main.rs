@@ -280,6 +280,9 @@ enum EndpointsCommand {
         /// GitHub personal access token (falls back to GITHUB_TOKEN env or gh CLI)
         #[arg(long)]
         github_token: Option<String>,
+        /// Provider-issued signing secret (e.g. Linear's lin_wh_…). Use `-` to read from stdin.
+        #[arg(long)]
+        signing_secret: Option<String>,
     },
     /// Deactivate endpoint by id
     Deactivate {
@@ -525,8 +528,17 @@ async fn main() -> anyhow::Result<()> {
                 events,
                 force,
                 github_token,
+                signing_secret,
             } => {
-                commands::endpoints::create(source, repo, events, force, github_token).await?;
+                commands::endpoints::create(
+                    source,
+                    repo,
+                    events,
+                    force,
+                    github_token,
+                    signing_secret,
+                )
+                .await?;
             }
             EndpointsCommand::Deactivate { id } => {
                 commands::endpoints::deactivate(id).await?;
