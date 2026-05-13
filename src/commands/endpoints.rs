@@ -112,6 +112,10 @@ pub async fn create(
         .get("github_webhook_secret")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    let webhook_secret_configured = payload
+        .get("webhook_secret_configured")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let id = payload
         .get("id")
         .and_then(|v| v.as_str())
@@ -120,10 +124,15 @@ pub async fn create(
     let config = crate::config::KiteConfig::load()?;
     let base = config.http_base();
 
-    let full_url = endpoint_with_token
-        .as_ref()
-        .map(|p| format!("{base}{p}"))
-        .unwrap_or_else(|| format!("{base}{endpoint}"));
+    let provider_signature_configured =
+        webhook_secret_configured || github_webhook_secret.is_some();
+    let urls = endpoint_urls(
+        &base,
+        &endpoint,
+        endpoint_with_token.as_deref(),
+        provider_signature_configured,
+    );
+    let webhook_url = urls.primary_webhook_url.as_str();
 
     // If --repo is provided, auto-register on GitHub
     if let Some(ref repo_name) = repo {
@@ -139,7 +148,7 @@ pub async fn create(
 
             match crate::github::register_webhook(
                 repo_name,
-                &full_url,
+                webhook_url,
                 secret,
                 &event_refs,
                 github_token.as_deref(),
@@ -150,7 +159,7 @@ pub async fn create(
                 Ok(()) => {
                     println!("Webhook configured on {repo_name}");
                     println!("- endpoint_id: {id}");
-                    println!("- webhook_url: {full_url}");
+                    println!("- webhook_url: {webhook_url}");
                     println!("- events: {}", event_list.join(", "));
                     return Ok(());
                 }
@@ -162,14 +171,15 @@ pub async fn create(
         }
     }
 
-    let webhook_secret_configured = payload
-        .get("webhook_secret_configured")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
     println!("Created endpoint:");
     println!("- id: {id}");
-    println!("- webhook_url: {full_url}");
+    println!("- webhook_url: {webhook_url}");
+    if provider_signature_configured {
+        println!(
+            "- bearer_webhook_url (shown once): {}",
+            urls.bearer_webhook_url
+        );
+    }
     println!("- hook_token (shown once): {hook_token}");
     if resolved_secret.is_some() {
         println!(
@@ -192,10 +202,77 @@ pub async fn create(
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct EndpointUrls {
+    primary_webhook_url: String,
+    bearer_webhook_url: String,
+}
+
+fn endpoint_urls(
+    base: &str,
+    endpoint: &str,
+    endpoint_with_token: Option<&str>,
+    provider_signature_configured: bool,
+) -> EndpointUrls {
+    let provider_webhook_url = format!("{base}{endpoint}");
+    let bearer_webhook_url = endpoint_with_token
+        .map(|path| format!("{base}{path}"))
+        .unwrap_or_else(|| provider_webhook_url.clone());
+    let primary_webhook_url = if provider_signature_configured {
+        provider_webhook_url
+    } else {
+        bearer_webhook_url.clone()
+    };
+
+    EndpointUrls {
+        primary_webhook_url,
+        bearer_webhook_url,
+    }
+}
+
 pub async fn deactivate(id: String) -> Result<()> {
     rpc::ensure_permission(ApiPermission::Write, "kite endpoints deactivate").await?;
     let payload = rpc::call("hooks.deactivate", serde_json::json!({ "id": id })).await?;
     let hook_id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("-");
     println!("Deactivated endpoint: {hook_id}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_signed_endpoint_uses_bare_webhook_url_as_primary() {
+        let urls = endpoint_urls(
+            "https://api.getkite.sh",
+            "/hooks/team/linear",
+            Some("/hooks/team/linear/khk_secret"),
+            true,
+        );
+
+        assert_eq!(
+            urls.primary_webhook_url,
+            "https://api.getkite.sh/hooks/team/linear"
+        );
+        assert_eq!(
+            urls.bearer_webhook_url,
+            "https://api.getkite.sh/hooks/team/linear/khk_secret"
+        );
+    }
+
+    #[test]
+    fn unsigned_endpoint_uses_bearer_webhook_url_as_primary() {
+        let urls = endpoint_urls(
+            "https://api.getkite.sh",
+            "/hooks/team/generic",
+            Some("/hooks/team/generic/khk_secret"),
+            false,
+        );
+
+        assert_eq!(
+            urls.primary_webhook_url,
+            "https://api.getkite.sh/hooks/team/generic/khk_secret"
+        );
+    }
 }
