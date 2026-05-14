@@ -246,17 +246,16 @@ pub async fn run(manifest_path: String) -> Result<()> {
                         }
 
                         // 2. Filter
-                        if let Some(ref filters) = filter_config {
-                            if filters.evaluate(&source, event.ty(), &data)
+                        if let Some(ref filters) = filter_config
+                            && filters.evaluate(&source, event.ty(), &data)
                                 == crate::pipeline::filter::FilterResult::Dropped
-                            {
-                                queue.lock().unwrap().update_status(
-                                    seq,
-                                    &EventStatus::Filtered,
-                                    None,
-                                )?;
-                                return Ok(AckDecision::Ack);
-                            }
+                        {
+                            queue.lock().unwrap().update_status(
+                                seq,
+                                &EventStatus::Filtered,
+                                None,
+                            )?;
+                            return Ok(AckDecision::Ack);
                         }
 
                         // 3. Enrichment
