@@ -3,7 +3,7 @@ use cloudevents::AttributesReader;
 use serde_json::json;
 
 use crate::config::{AgentConfig, KiteConfig};
-use crate::ws_client;
+use crate::ws_client::{self, AckDecision};
 use kite_protocol::agent_message::{AgentMessage, EVENT_TYPE as AGENT_MESSAGE_EVENT_TYPE};
 
 /// `kite agent register` — persist a stable agent id locally.
@@ -58,22 +58,22 @@ pub async fn listen(as_id: Option<String>, json_mode: bool) -> Result<()> {
 
     loop {
         match ws_client::connect(&ws_url, &api_key, &team_id, vec![scope.clone()], None).await {
-            Ok((_sink_ws, stream, last_seq, _client_id)) => {
+            Ok((sink_ws, stream, last_seq, _client_id)) => {
                 backoff = 1;
                 eprintln!("Connected (last_seq: {last_seq})");
 
                 let agent_id = agent_id.clone();
-                let result = ws_client::event_loop(stream, move |_seq, event| {
+                let result = ws_client::event_loop_with_ack(sink_ws, stream, move |_seq, event| {
                     let agent_id = agent_id.clone();
                     async move {
                         if event.ty() != AGENT_MESSAGE_EVENT_TYPE {
-                            return Ok(());
+                            return Ok(AckDecision::Ack);
                         }
                         let Some(msg) = AgentMessage::from_event(&event) else {
-                            return Ok(());
+                            return Ok(AckDecision::Ack);
                         };
                         if msg.to != agent_id {
-                            return Ok(());
+                            return Ok(AckDecision::Ack);
                         }
 
                         if json_mode {
@@ -82,7 +82,7 @@ pub async fn listen(as_id: Option<String>, json_mode: bool) -> Result<()> {
                         } else {
                             print_message(&msg, event.id());
                         }
-                        Ok(())
+                        Ok(AckDecision::Ack)
                     }
                 })
                 .await;

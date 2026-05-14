@@ -8,7 +8,7 @@ use crate::sinks::Sink;
 use crate::sinks::SinkResult;
 use crate::sinks::exec::ExecSink;
 use crate::sinks::stdout::StdoutSink;
-use crate::ws_client;
+use crate::ws_client::{self, AckDecision};
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -60,7 +60,7 @@ pub async fn run(
         )
         .await
         {
-            Ok((_sink_ws, stream, last_seq, _assigned_client_id)) => {
+            Ok((sink_ws, stream, last_seq, _assigned_client_id)) => {
                 backoff = 1;
                 eprintln!("Connected (last_seq: {last_seq})");
 
@@ -71,7 +71,7 @@ pub async fn run(
                 let team_id = team_id.clone();
                 let importance_filter = importance_filter.clone();
 
-                let result = ws_client::event_loop(stream, |_seq, event| {
+                let result = ws_client::event_loop_with_ack(sink_ws, stream, |_seq, event| {
                     let source_filter = source_filter.clone();
                     let type_filter = type_filter.clone();
                     let exec_cmd = exec_cmd.clone();
@@ -85,13 +85,13 @@ pub async fn run(
                             let event_type = event.ty();
                             let event_source = event.source().to_string();
                             if !event_type.contains(src) && !event_source.contains(src) {
-                                return Ok(());
+                                return Ok(AckDecision::Ack);
                             }
                         }
                         if let Some(ref ty) = type_filter
                             && !event.ty().contains(ty)
                         {
-                            return Ok(());
+                            return Ok(AckDecision::Ack);
                         }
 
                         // Derive metadata for queue insertion
@@ -128,7 +128,7 @@ pub async fn run(
                                     &crate::queue::EventStatus::Filtered,
                                     None,
                                 )?;
-                                return Ok(());
+                                return Ok(AckDecision::Ack);
                             }
                         }
 
@@ -141,30 +141,38 @@ pub async fn run(
                         // 3. Deliver to sink
                         let result = if let Some(ref cmd) = exec_cmd {
                             let mut exec_sink = ExecSink::new(cmd.clone());
-                            exec_sink.handle(&event).await?
+                            exec_sink.handle(&event).await
                         } else {
                             let json_mode = json;
                             let compact_mode = compact;
                             let mut stdout_sink = StdoutSink::new(json_mode, compact_mode);
-                            stdout_sink.handle(&event).await?
+                            stdout_sink.handle(&event).await
                         };
 
                         // 4. Update final status
                         {
                             let q = queue.lock().unwrap();
                             match result {
-                                SinkResult::Ok => {
+                                Ok(SinkResult::Ok) => {
                                     q.update_status(seq, &EventStatus::Delivered, None)?
                                 }
-                                SinkResult::Retry => q.update_status(
+                                Ok(SinkResult::Retry) => q.update_status(
                                     seq,
                                     &EventStatus::Failed,
                                     Some("sink returned retry"),
                                 )?,
+                                Err(ref e) => q.update_status(
+                                    seq,
+                                    &EventStatus::Failed,
+                                    Some(&e.to_string()),
+                                )?,
                             }
                         }
 
-                        Ok(())
+                        match result {
+                            Ok(SinkResult::Ok) => Ok(AckDecision::Ack),
+                            Ok(SinkResult::Retry) | Err(_) => Ok(AckDecision::NoAckStop),
+                        }
                     }
                 })
                 .await;

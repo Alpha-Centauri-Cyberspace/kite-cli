@@ -4,7 +4,7 @@ use cloudevents::AttributesReader;
 use crate::config::KiteConfig;
 use crate::sinks::Sink;
 use crate::sinks::socket::SocketSink;
-use crate::ws_client;
+use crate::ws_client::{self, AckDecision};
 
 pub async fn run(socket_path: String, source: Option<String>) -> Result<()> {
     let config = KiteConfig::load()?;
@@ -33,14 +33,14 @@ pub async fn run(socket_path: String, source: Option<String>) -> Result<()> {
 
     loop {
         match ws_client::connect(&ws_url, &api_key, &team_id, scopes.clone(), None).await {
-            Ok((_sink_ws, stream, last_seq, _client_id)) => {
+            Ok((sink_ws, stream, last_seq, _client_id)) => {
                 backoff = 1;
                 eprintln!("Connected (last_seq: {last_seq})");
 
                 let source_filter = source.clone();
                 let socket_tx = socket_tx.clone();
 
-                let result = ws_client::event_loop(stream, |_seq, event| {
+                let result = ws_client::event_loop_with_ack(sink_ws, stream, |_seq, event| {
                     let source_filter = source_filter.clone();
                     let socket_tx = socket_tx.clone();
 
@@ -49,14 +49,16 @@ pub async fn run(socket_path: String, source: Option<String>) -> Result<()> {
                             let event_type = event.ty();
                             let event_source = event.source().to_string();
                             if !event_type.contains(src) && !event_source.contains(src) {
-                                return Ok(());
+                                return Ok(AckDecision::Ack);
                             }
                         }
 
                         // Push event through the socket sink's broadcast channel
                         let json = serde_json::to_string(&event)?;
-                        let _ = socket_tx.send(json);
-                        Ok(())
+                        match socket_tx.send(json) {
+                            Ok(_) => Ok(AckDecision::Ack),
+                            Err(_) => Ok(AckDecision::NoAckStop),
+                        }
                     }
                 })
                 .await;

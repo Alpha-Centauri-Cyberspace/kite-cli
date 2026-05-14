@@ -139,6 +139,12 @@ pub struct Queue {
     conn: Connection,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionReport {
+    pub expired_deleted: usize,
+    pub max_size_deleted: usize,
+}
+
 impl Queue {
     /// Open (or create) the queue database at the given path.
     pub fn open(path: &Path) -> Result<Self> {
@@ -256,6 +262,7 @@ impl Queue {
         status: Option<&EventStatus>,
         source: Option<&str>,
         importance: Option<&Importance>,
+        created_since: Option<i64>,
         limit: Option<u32>,
     ) -> Result<Vec<QueuedEvent>> {
         let mut sql = String::from(
@@ -280,6 +287,11 @@ impl Queue {
         if let Some(imp) = importance {
             sql.push_str(&format!(" AND importance=?{}", idx));
             values.push(Box::new(imp.as_str().to_owned()));
+            idx += 1;
+        }
+        if let Some(since) = created_since {
+            sql.push_str(&format!(" AND created_at>=?{}", idx));
+            values.push(Box::new(since));
             idx += 1;
         }
 
@@ -318,6 +330,49 @@ impl Queue {
             params![before_timestamp],
         )?;
         Ok(n)
+    }
+
+    /// Apply manifest queue retention settings using the provided current timestamp.
+    pub fn apply_manifest_retention(
+        &self,
+        config: &crate::manifest::QueueConfig,
+        now_timestamp: i64,
+    ) -> Result<RetentionReport> {
+        let retention_seconds = config.retention_seconds()?;
+        let cutoff = now_timestamp.saturating_sub(retention_seconds);
+        let expired_deleted = self.flush_before(cutoff)?;
+        let max_size_deleted = if let Some(max_size) = config.max_event_count()? {
+            self.trim_to_max_size(max_size)?
+        } else {
+            0
+        };
+
+        Ok(RetentionReport {
+            expired_deleted,
+            max_size_deleted,
+        })
+    }
+
+    fn trim_to_max_size(&self, max_size: usize) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))?;
+        let max_size = i64::try_from(max_size).unwrap_or(i64::MAX);
+        let excess = count.saturating_sub(max_size);
+        if excess == 0 {
+            return Ok(0);
+        }
+
+        let deleted = self.conn.execute(
+            "DELETE FROM events
+             WHERE seq IN (
+                 SELECT seq FROM events
+                 ORDER BY created_at ASC, seq ASC
+                 LIMIT ?1
+             )",
+            params![excess],
+        )?;
+        Ok(deleted)
     }
 
     /// Return the highest seq currently in the table, or None if empty.
@@ -544,24 +599,52 @@ mod tests {
 
         // Filter by source=github
         let github = q
-            .list(None, Some("github"), None, None)
+            .list(None, Some("github"), None, None, None)
             .expect("list source");
         assert_eq!(github.len(), 2);
         assert!(github.iter().all(|e| e.source == "github"));
 
         // Filter by status=pending
         let pending = q
-            .list(Some(&EventStatus::Pending), None, None, None)
+            .list(Some(&EventStatus::Pending), None, None, None, None)
             .expect("list status");
         assert_eq!(pending.len(), 2);
         assert!(pending.iter().all(|e| e.status == "pending"));
 
         // Combine source + status
         let github_pending = q
-            .list(Some(&EventStatus::Pending), Some("github"), None, None)
+            .list(
+                Some(&EventStatus::Pending),
+                Some("github"),
+                None,
+                None,
+                None,
+            )
             .expect("combined");
         assert_eq!(github_pending.len(), 1);
         assert_eq!(github_pending[0].seq, 1);
+    }
+
+    #[test]
+    fn test_list_with_created_since_filter() {
+        let q = make_queue();
+        q.insert(1, "e1", "t1", "github", "push", "{}", 1000)
+            .unwrap();
+        q.insert(2, "e2", "t1", "github", "push", "{}", 2000)
+            .unwrap();
+        q.insert(3, "e3", "t1", "stripe", "charge", "{}", 3000)
+            .unwrap();
+
+        let recent = q
+            .list(None, None, None, Some(2000), None)
+            .expect("list since");
+        assert_eq!(recent.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![2, 3]);
+
+        let recent_github = q
+            .list(None, Some("github"), None, Some(1500), None)
+            .expect("list source since");
+        assert_eq!(recent_github.len(), 1);
+        assert_eq!(recent_github[0].seq, 2);
     }
 
     #[test]
@@ -599,6 +682,30 @@ mod tests {
         assert!(q.get(1).unwrap().is_none());
         assert!(q.get(2).unwrap().is_some());
         assert!(q.get(3).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_apply_manifest_retention_flushes_old_events_and_trims_to_max_size() {
+        let q = make_queue();
+        q.insert(1, "e1", "t1", "github", "push", "{}", 80).unwrap();
+        q.insert(2, "e2", "t1", "github", "push", "{}", 91).unwrap();
+        q.insert(3, "e3", "t1", "github", "push", "{}", 95).unwrap();
+        q.insert(4, "e4", "t1", "github", "push", "{}", 99).unwrap();
+
+        let config = crate::manifest::QueueConfig {
+            retention: "10s".to_string(),
+            max_size: Some("2".to_string()),
+        };
+
+        let report = q.apply_manifest_retention(&config, 100).unwrap();
+        assert_eq!(report.expired_deleted, 1);
+        assert_eq!(report.max_size_deleted, 1);
+
+        let remaining = q.list(None, None, None, None, None).unwrap();
+        assert_eq!(
+            remaining.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            vec![3, 4]
+        );
     }
 
     #[test]

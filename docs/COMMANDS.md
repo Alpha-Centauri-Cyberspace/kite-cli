@@ -72,15 +72,15 @@ Stream webhook events to stdout
 Usage: kite stream [OPTIONS]
 
 Options:
-      --source <SOURCE>           Filter by source (e.g. "github", "stripe")
-      --event-type <type>         Filter by event type
-      --json                      Output full CloudEvent JSON per line
-      --compact                   Output compact one-line summaries only
-      --exec <EXEC>               Execute a command for each event, passing event JSON on stdin
-      --client-id <CLIENT_ID>     Persistent client ID for delivery cursor tracking
-      --importance <IMPORTANCE>   Minimum importance level to deliver (low, normal, high, critical)
-  -h, --help                      Print help
-  -V, --version                   Print version
+      --source <SOURCE>          Filter by source (e.g. "github", "stripe")
+      --event-type <type>        Filter by event type
+      --json                     Output full CloudEvent JSON per line
+      --compact                  Output compact one-line summaries only
+      --exec <EXEC>              Execute a command for each event, passing event JSON on stdin
+      --client-id <CLIENT_ID>    Persistent client ID for delivery cursor tracking
+      --importance <IMPORTANCE>  Minimum importance level to deliver (low, normal, high, critical)
+  -h, --help                     Print help
+  -V, --version                  Print version
 ```
 
 ## `kite proxy`
@@ -266,14 +266,22 @@ Create or rotate endpoint credentials for a source (GitHub includes a one-time w
 Usage: kite endpoints create [OPTIONS] --source <SOURCE>
 
 Options:
-      --source <SOURCE>                  Source name (e.g. github, stripe)
-      --repo <REPO>                      GitHub repo (owner/name) — auto-registers webhook via GitHub API
-      --events <EVENTS>                  Webhook events to subscribe to (comma-separated, default: push,pull_request,issues)
-      --force                            Replace existing webhook on the repo
-      --github-token <GITHUB_TOKEN>      GitHub personal access token (falls back to GITHUB_TOKEN env or gh CLI)
-      --signing-secret <SIGNING_SECRET>  Provider-issued signing secret (e.g. Linear's lin_wh_…). Use `-` to read from stdin
-  -h, --help                             Print help
-  -V, --version                          Print version
+      --source <SOURCE>
+          Source name (e.g. github, stripe)
+      --repo <REPO>
+          GitHub repo (owner/name) — auto-registers webhook via GitHub API
+      --events <EVENTS>
+          Webhook events to subscribe to (comma-separated, default: push,pull_request,issues)
+      --force
+          Replace existing webhook on the repo
+      --github-token <GITHUB_TOKEN>
+          GitHub personal access token (falls back to GITHUB_TOKEN env or gh CLI)
+      --signing-secret <SIGNING_SECRET>
+          Provider-issued signing secret (e.g. Linear's lin_wh_…). Use `-` to read from stdin
+  -h, --help
+          Print help
+  -V, --version
+          Print version
 ```
 
 ## `kite endpoints deactivate`
@@ -441,6 +449,179 @@ Options:
   -V, --version                  Print version
 ```
 
+## `kite skill export`
+
+```text
+Export the kite SKILL.md to agent skill directories
+
+Usage: kite skill export [OPTIONS]
+
+Options:
+      --format <FORMAT>  Target platform: claude, agents, openclaw, or paperclip (default: claude)
+      --auto             Auto-detect all present agent skill directories and export to each
+  -h, --help             Print help
+  -V, --version          Print version
+```
+
+## `kite queue`
+
+```text
+Inspect and manage the local event queue
+
+Usage: kite queue <COMMAND>
+
+Commands:
+  list    List queued events (with optional filters)
+  show    Show full details for a single queued event
+  replay  Replay queued events to a target URL
+  flush   Delete events older than a given duration
+  stats   Show event counts grouped by status
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+## `kite queue list`
+
+```text
+List queued events (with optional filters)
+
+Usage: kite queue list [OPTIONS]
+
+Options:
+      --status <STATUS>          Filter by status (pending, ready, delivered, failed, filtered, enriching)
+      --source <SOURCE>          Filter by source (e.g. "github")
+      --importance <IMPORTANCE>  Filter by importance (low, normal, high, critical)
+      --since <SINCE>            Only show events created since this duration ago (e.g. "24h", "7d")
+      --limit <LIMIT>            Maximum number of events to show [default: 50]
+  -h, --help                     Print help
+  -V, --version                  Print version
+```
+
+## `kite queue show`
+
+```text
+Show full details for a single queued event
+
+Usage: kite queue show <SEQ>
+
+Arguments:
+  <SEQ>  Sequence number of the event
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+## `kite queue replay`
+
+```text
+Replay queued events to a target URL
+
+Usage: kite queue replay [OPTIONS] --target <TARGET>
+
+Options:
+      --status <STATUS>  Filter by status (default: failed)
+      --source <SOURCE>  Filter by source
+      --seq <SEQ>        Replay a single event by sequence number
+      --target <TARGET>  Target URL to POST events to
+  -h, --help             Print help
+  -V, --version          Print version
+```
+
+## `kite queue flush`
+
+```text
+Delete events older than a given duration
+
+Usage: kite queue flush <BEFORE>
+
+Arguments:
+  <BEFORE>  Delete events older than this duration (e.g. "7d", "24h", "30m")
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+## `kite queue stats`
+
+```text
+Show event counts grouped by status
+
+Usage: kite queue stats
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+## `kite agent`
+
+```text
+Send and receive agent-to-agent messages on Kite Cloud
+
+Usage: kite agent <COMMAND>
+
+Commands:
+  register  Register a stable agent identity on this machine
+  listen    Listen for `com.kite.agent.message` events addressed to this agent
+  send      Send an agent message to another agent on the same team
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+## `kite agent register`
+
+```text
+Register a stable agent identity on this machine
+
+Usage: kite agent register [OPTIONS]
+
+Options:
+      --name <NAME>  Optional friendly name (slugged into the agent id)
+  -h, --help         Print help
+  -V, --version      Print version
+```
+
+## `kite agent send`
+
+```text
+Send an agent message to another agent on the same team
+
+Usage: kite agent send [OPTIONS] --to <AGENT_ID> <BODY>
+
+Arguments:
+  <BODY>  Message body
+
+Options:
+      --to <AGENT_ID>        Recipient agent id
+      --from <AGENT_ID>      Sender agent id (defaults to the registered id on this machine)
+      --thread <THREAD_ID>   Optional thread id for grouping replies
+      --reply-to <EVENT_ID>  Optional event id this message replies to
+  -h, --help                 Print help
+  -V, --version              Print version
+```
+
+## `kite agent listen`
+
+```text
+Listen for `com.kite.agent.message` events addressed to this agent
+
+Usage: kite agent listen [OPTIONS]
+
+Options:
+      --as-id <AGENT_ID>  Override the agent id to listen as (defaults to the registered id)
+      --json              Print full CloudEvent JSON per line instead of a one-line summary
+  -h, --help              Print help
+  -V, --version           Print version
+```
+
 ## `kite logs`
 
 ```text
@@ -479,69 +660,5 @@ Options:
       --server <SERVER>  Override update server base URL
   -h, --help             Print help
   -V, --version          Print version
-```
-
-## `kite agent`
-
-```text
-Send and receive agent-to-agent messages on Kite Cloud
-
-Usage: kite agent <COMMAND>
-
-Commands:
-  register  Register a stable agent identity on this machine
-  listen    Listen for `com.kite.agent.message` events addressed to this agent
-  send      Send an agent message to another agent on the same team
-  help      Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help     Print help
-  -V, --version  Print version
-```
-
-## `kite agent register`
-
-```text
-Register a stable agent identity on this machine
-
-Usage: kite agent register [OPTIONS]
-
-Options:
-      --name <NAME>  Optional friendly name (slugged into the agent id)
-  -h, --help         Print help
-  -V, --version      Print version
-```
-
-## `kite agent listen`
-
-```text
-Listen for `com.kite.agent.message` events addressed to this agent
-
-Usage: kite agent listen [OPTIONS]
-
-Options:
-      --as-id <AGENT_ID>  Override the agent id to listen as (defaults to the registered id)
-      --json              Print full CloudEvent JSON per line instead of a one-line summary
-  -h, --help              Print help
-  -V, --version           Print version
-```
-
-## `kite agent send`
-
-```text
-Send an agent message to another agent on the same team
-
-Usage: kite agent send [OPTIONS] --to <AGENT_ID> <BODY>
-
-Arguments:
-  <BODY>  Message body
-
-Options:
-      --to <AGENT_ID>          Recipient agent id
-      --from <AGENT_ID>        Sender agent id (defaults to the registered id on this machine)
-      --thread <THREAD_ID>     Optional thread id for grouping replies
-      --reply-to <EVENT_ID>    Optional event id this message replies to
-  -h, --help                   Print help
-  -V, --version                Print version
 ```
 

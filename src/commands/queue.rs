@@ -39,7 +39,7 @@ pub fn list(
     status: Option<String>,
     source: Option<String>,
     importance: Option<String>,
-    _since: Option<String>,
+    since: Option<String>,
     limit: u32,
 ) -> Result<()> {
     let path = queue_db_path();
@@ -50,11 +50,17 @@ pub fn list(
         .as_deref()
         .map(Importance::from_str)
         .transpose()?;
+    let since_filter = since
+        .as_deref()
+        .map(parse_duration_ago)
+        .transpose()?
+        .map(|dt| dt.timestamp());
 
     let events = queue.list(
         status_filter.as_ref(),
         source.as_deref(),
         importance_filter.as_ref(),
+        since_filter,
         Some(limit),
     )?;
 
@@ -164,6 +170,7 @@ pub async fn replay(
             Some(&status_filter),
             source.as_deref(),
             importance_filter.as_ref(),
+            None,
             None,
         )?
     };

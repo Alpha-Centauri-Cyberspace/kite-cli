@@ -40,8 +40,8 @@ cargo build --release
 ```bash
 kite login                   # device-auth flow
 kite stream                  # follow events for your team
-kite proxy http://localhost:3000/webhooks
-kite run kite.json           # manifest-driven routing
+kite proxy --target http://localhost:3000/webhooks
+kite run --manifest kite.json
 ```
 
 Full command reference: [`docs/COMMANDS.md`](./docs/COMMANDS.md).

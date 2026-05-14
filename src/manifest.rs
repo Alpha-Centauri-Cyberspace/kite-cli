@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::pipeline::filter::{FilterConfig, FilterRule};
@@ -127,6 +127,131 @@ fn default_retention() -> String {
     "7d".to_string()
 }
 
+impl DedupConfig {
+    /// Return the deduplication window in seconds.
+    pub fn window_seconds(&self) -> Result<i64> {
+        parse_duration_seconds(&self.window)
+    }
+
+    /// Build a stable deduplication key from queued metadata and event JSON.
+    pub fn key_for(
+        &self,
+        source: &str,
+        event_type: &str,
+        event_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String> {
+        let mut parts = Vec::with_capacity(self.key.len());
+        for field in &self.key {
+            let value = dedup_field_value(field, source, event_type, event_id, payload)
+                .ok_or_else(|| anyhow!("dedup key field {:?} is unavailable", field))?;
+            parts.push(format!("{field}={value}"));
+        }
+        Ok(parts.join("|"))
+    }
+}
+
+impl QueueConfig {
+    /// Return the queue retention period in seconds.
+    pub fn retention_seconds(&self) -> Result<i64> {
+        parse_duration_seconds(&self.retention)
+    }
+
+    /// Return the configured maximum retained event count.
+    pub fn max_event_count(&self) -> Result<Option<usize>> {
+        self.max_size.as_deref().map(parse_count).transpose()
+    }
+}
+
+pub fn parse_duration_seconds(input: &str) -> Result<i64> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("duration string is empty"));
+    }
+
+    let (number, unit) = trimmed.split_at(trimmed.len() - 1);
+    let amount = parse_count_i64(number)?;
+    let seconds = match unit {
+        "s" => amount,
+        "m" => amount * 60,
+        "h" => amount * 3_600,
+        "d" => amount * 86_400,
+        other => return Err(anyhow!("unknown duration unit {:?} (use s/m/h/d)", other)),
+    };
+
+    Ok(seconds)
+}
+
+pub fn parse_count(input: &str) -> Result<usize> {
+    let count = parse_count_i64(input)?;
+    usize::try_from(count).map_err(|_| anyhow!("count {:?} is too large", input))
+}
+
+fn parse_count_i64(input: &str) -> Result<i64> {
+    let normalized = input.trim().replace('_', "");
+    if normalized.is_empty() {
+        return Err(anyhow!("count string is empty"));
+    }
+    let count: i64 = normalized
+        .parse()
+        .map_err(|_| anyhow!("invalid count {:?}", input))?;
+    if count < 0 {
+        return Err(anyhow!("count {:?} must be non-negative", input));
+    }
+    Ok(count)
+}
+
+fn dedup_field_value(
+    field: &str,
+    source: &str,
+    event_type: &str,
+    event_id: &str,
+    payload: &serde_json::Value,
+) -> Option<String> {
+    match field {
+        "source" => Some(source.to_string()),
+        "type" | "event_type" => Some(event_type.to_string()),
+        "event_id" | "id" => Some(event_id.to_string()),
+        "ref" | "git_ref" => first_string_at(
+            payload,
+            &[
+                &["ref"],
+                &["git_ref"],
+                &["data", "ref"],
+                &["data", "git_ref"],
+                &["pull_request", "head", "ref"],
+                &["data", "pull_request", "head", "ref"],
+            ],
+        ),
+        "actor" => first_string_at(
+            payload,
+            &[
+                &["actor"],
+                &["sender", "login"],
+                &["user", "login"],
+                &["author", "login"],
+                &["data", "actor"],
+                &["data", "sender", "login"],
+                &["data", "user", "login"],
+                &["data", "author", "login"],
+            ],
+        ),
+        other => first_string_at(payload, &[&[other], &["data", other]]),
+    }
+}
+
+fn first_string_at(payload: &serde_json::Value, paths: &[&[&str]]) -> Option<String> {
+    paths.iter().find_map(|path| string_at(payload, path))
+}
+
+fn string_at(payload: &serde_json::Value, path: &[&str]) -> Option<String> {
+    let mut current = payload;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    current.as_str().map(ToOwned::to_owned)
+}
+
 impl Manifest {
     /// Load a manifest from a file path.
     pub fn load(path: &str) -> Result<Self> {
@@ -193,5 +318,43 @@ mod tests {
             SinkConfig::Exec { command, .. } => assert_eq!(command, "./handle.sh"),
             _ => panic!("Expected Exec sink"),
         }
+    }
+
+    #[test]
+    fn queue_config_parses_retention_and_max_size() {
+        let config = QueueConfig {
+            retention: "24h".to_string(),
+            max_size: Some("1_500".to_string()),
+        };
+
+        assert_eq!(config.retention_seconds().unwrap(), 86_400);
+        assert_eq!(config.max_event_count().unwrap(), Some(1_500));
+    }
+
+    #[test]
+    fn dedup_config_builds_key_from_metadata_and_payload() {
+        let config = DedupConfig {
+            window: "10m".to_string(),
+            key: vec![
+                "source".to_string(),
+                "type".to_string(),
+                "event_id".to_string(),
+                "ref".to_string(),
+                "actor".to_string(),
+            ],
+            strategy: "keep_first".to_string(),
+        };
+        let payload = serde_json::json!({
+            "ref": "refs/heads/main",
+            "sender": {"login": "octocat"}
+        });
+
+        assert_eq!(config.window_seconds().unwrap(), 600);
+        assert_eq!(
+            config
+                .key_for("github", "com.github.push", "evt-1", &payload)
+                .unwrap(),
+            "source=github|type=com.github.push|event_id=evt-1|ref=refs/heads/main|actor=octocat"
+        );
     }
 }

@@ -1,5 +1,6 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use cloudevents::AttributesReader;
+use std::collections::{HashMap, hash_map::Entry};
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 
@@ -7,13 +8,14 @@ use crate::config::KiteConfig;
 use crate::manifest::{Manifest, SinkConfig};
 use crate::queue::EventStatus;
 use crate::sinks::Sink;
+use crate::sinks::SinkResult;
 use crate::sinks::exec::ExecSink;
 use crate::sinks::mcp::{McpSink, McpSinkHandle};
 use crate::sinks::paperclip::{PaperclipSink, PaperclipSinkConfig};
 use crate::sinks::proxy::ProxySink;
 use crate::sinks::socket::SocketSink;
 use crate::sinks::stdout::StdoutSink;
-use crate::ws_client;
+use crate::ws_client::{self, AckDecision};
 
 /// A handle to a long-lived sink that can be cloned into the event loop.
 #[derive(Clone)]
@@ -24,6 +26,42 @@ enum SinkHandle {
     Exec(Arc<Mutex<ExecSink>>),
     Mcp(McpSinkHandle),
     Paperclip(Arc<Mutex<PaperclipSink>>),
+}
+
+#[derive(Default)]
+struct DedupWindow {
+    seen: HashMap<String, i64>,
+}
+
+impl DedupWindow {
+    fn should_deliver(
+        &mut self,
+        key: String,
+        now_ts: i64,
+        window_seconds: i64,
+        strategy: &str,
+    ) -> Result<bool> {
+        self.seen
+            .retain(|_, seen_at| now_ts.saturating_sub(*seen_at) <= window_seconds);
+
+        match self.seen.entry(key) {
+            Entry::Vacant(entry) => {
+                entry.insert(now_ts);
+                Ok(true)
+            }
+            Entry::Occupied(mut entry) => match strategy {
+                "keep_first" => Ok(false),
+                "keep_last" => {
+                    entry.insert(now_ts);
+                    Ok(false)
+                }
+                other => Err(anyhow!(
+                    "unknown dedup strategy {:?} (use keep_first or keep_last)",
+                    other
+                )),
+            },
+        }
+    }
 }
 
 pub async fn run(manifest_path: String) -> Result<()> {
@@ -45,6 +83,9 @@ pub async fn run(manifest_path: String) -> Result<()> {
     let filter_config = manifest.filters.clone();
     let enrichment_hooks = manifest.enrichment.clone();
     let scoring_config = manifest.scoring.clone();
+    let queue_config = manifest.queue.clone();
+    let dedup_config = scoring_config.as_ref().and_then(|s| s.dedup.clone());
+    let dedup_window = Arc::new(std::sync::Mutex::new(DedupWindow::default()));
     let min_importance: Option<crate::queue::Importance> = match &manifest.sink {
         SinkConfig::Exec { importance, .. } => importance
             .as_ref()
@@ -99,7 +140,7 @@ pub async fn run(manifest_path: String) -> Result<()> {
 
     loop {
         match ws_client::connect(&ws_url, &api_key, &team_id, scopes.clone(), None).await {
-            Ok((_sink_ws, stream, last_seq, _client_id)) => {
+            Ok((sink_ws, stream, last_seq, _client_id)) => {
                 backoff = 1;
                 eprintln!("Connected (last_seq: {last_seq})");
 
@@ -110,9 +151,12 @@ pub async fn run(manifest_path: String) -> Result<()> {
                 let filter_config = filter_config.clone();
                 let enrichment_hooks = enrichment_hooks.clone();
                 let scoring_config = scoring_config.clone();
+                let queue_config = queue_config.clone();
+                let dedup_config = dedup_config.clone();
+                let dedup_window = Arc::clone(&dedup_window);
                 let min_importance = min_importance.clone();
 
-                let result = ws_client::event_loop(stream, |_seq, event| {
+                let result = ws_client::event_loop_with_ack(sink_ws, stream, |_seq, event| {
                     let manifest = manifest.clone();
                     let sink_handle = sink_handle.clone();
                     let queue = Arc::clone(&queue);
@@ -120,6 +164,9 @@ pub async fn run(manifest_path: String) -> Result<()> {
                     let filter_config = filter_config.clone();
                     let enrichment_hooks = enrichment_hooks.clone();
                     let scoring_config = scoring_config.clone();
+                    let queue_config = queue_config.clone();
+                    let dedup_config = dedup_config.clone();
+                    let dedup_window = Arc::clone(&dedup_window);
                     let min_importance = min_importance.clone();
 
                     async move {
@@ -143,7 +190,7 @@ pub async fn run(manifest_path: String) -> Result<()> {
                             });
 
                             if !matches {
-                                return Ok(());
+                                return Ok(AckDecision::Ack);
                             }
                         }
 
@@ -159,6 +206,9 @@ pub async fn run(manifest_path: String) -> Result<()> {
 
                         // 1. Queue the raw event
                         let raw_json = serde_json::to_string(&event)?;
+                        let raw_value = serde_json::from_str::<serde_json::Value>(&raw_json)
+                            .unwrap_or_default();
+                        let data = raw_value.get("data").cloned().unwrap_or_default();
                         queue.lock().unwrap().insert(
                             seq,
                             event.id(),
@@ -168,13 +218,35 @@ pub async fn run(manifest_path: String) -> Result<()> {
                             &raw_json,
                             now_ts,
                         )?;
+                        if let Some(ref queue_config) = queue_config {
+                            queue
+                                .lock()
+                                .unwrap()
+                                .apply_manifest_retention(queue_config, now_ts)?;
+                        }
+
+                        if let Some(ref dedup) = dedup_config {
+                            let window_seconds = dedup.window_seconds()?;
+                            let dedup_key =
+                                dedup.key_for(&source, event.ty(), event.id(), &data)?;
+                            let should_deliver = dedup_window.lock().unwrap().should_deliver(
+                                dedup_key,
+                                now_ts,
+                                window_seconds,
+                                &dedup.strategy,
+                            )?;
+                            if !should_deliver {
+                                queue.lock().unwrap().update_status(
+                                    seq,
+                                    &EventStatus::Filtered,
+                                    Some("duplicate within dedup window"),
+                                )?;
+                                return Ok(AckDecision::Ack);
+                            }
+                        }
 
                         // 2. Filter
                         if let Some(ref filters) = filter_config {
-                            let data = serde_json::from_str::<serde_json::Value>(&raw_json)
-                                .ok()
-                                .and_then(|v| v.get("data").cloned())
-                                .unwrap_or_default();
                             if filters.evaluate(&source, event.ty(), &data)
                                 == crate::pipeline::filter::FilterResult::Dropped
                             {
@@ -183,16 +255,12 @@ pub async fn run(manifest_path: String) -> Result<()> {
                                     &EventStatus::Filtered,
                                     None,
                                 )?;
-                                return Ok(());
+                                return Ok(AckDecision::Ack);
                             }
                         }
 
                         // 3. Enrichment
                         if let Some(ref hooks) = enrichment_hooks {
-                            let data = serde_json::from_str::<serde_json::Value>(&raw_json)
-                                .ok()
-                                .and_then(|v| v.get("data").cloned())
-                                .unwrap_or_default();
                             if let Some(enriched) = crate::pipeline::enrich::run_enrichment(
                                 hooks,
                                 &source,
@@ -219,11 +287,6 @@ pub async fn run(manifest_path: String) -> Result<()> {
 
                         // 4. Scoring
                         if let Some(ref scoring) = scoring_config {
-                            let data = serde_json::from_str::<serde_json::Value>(&raw_json)
-                                .ok()
-                                .and_then(|v| v.get("data").cloned())
-                                .unwrap_or_default();
-
                             // Get changed_files from enrichment payload if available
                             let queued = queue.lock().unwrap().get(seq)?;
                             let changed_files: Option<Vec<String>> = queued
@@ -245,37 +308,69 @@ pub async fn run(manifest_path: String) -> Result<()> {
                             if let Some(ref min_imp) = min_importance
                                 && importance.rank() < min_imp.rank()
                             {
-                                return Ok(());
+                                queue.lock().unwrap().update_status(
+                                    seq,
+                                    &EventStatus::Filtered,
+                                    None,
+                                )?;
+                                return Ok(AckDecision::Ack);
                             }
                         }
 
                         // 5. Route to sink
-                        match &sink_handle {
+                        let sink_result = match &sink_handle {
                             SinkHandle::Stdout { json } => {
                                 let mut s = StdoutSink::new(*json, false);
-                                s.handle(&event).await?;
+                                s.handle(&event).await
                             }
                             SinkHandle::Proxy(sink) => {
                                 let mut sink = sink.lock().await;
-                                sink.handle(&event).await?;
+                                sink.handle(&event).await
                             }
                             SinkHandle::Socket(tx) => {
                                 let json = serde_json::to_string(&event)?;
-                                let _ = tx.send(json);
+                                match tx.send(json) {
+                                    Ok(_) => Ok(SinkResult::Ok),
+                                    Err(e) => Err(anyhow!(e.to_string())),
+                                }
                             }
                             SinkHandle::Exec(sink) => {
                                 let mut sink = sink.lock().await;
-                                sink.handle(&event).await?;
+                                sink.handle(&event).await
                             }
                             SinkHandle::Mcp(handle) => {
                                 handle.push_event(&event).await;
+                                Ok(SinkResult::Ok)
                             }
                             SinkHandle::Paperclip(sink) => {
                                 let mut sink = sink.lock().await;
-                                sink.handle(&event).await?;
+                                sink.handle(&event).await
+                            }
+                        };
+
+                        {
+                            let q = queue.lock().unwrap();
+                            match sink_result {
+                                Ok(SinkResult::Ok) => {
+                                    q.update_status(seq, &EventStatus::Delivered, None)?
+                                }
+                                Ok(SinkResult::Retry) => q.update_status(
+                                    seq,
+                                    &EventStatus::Failed,
+                                    Some("sink returned retry"),
+                                )?,
+                                Err(ref e) => q.update_status(
+                                    seq,
+                                    &EventStatus::Failed,
+                                    Some(&e.to_string()),
+                                )?,
                             }
                         }
-                        Ok(())
+
+                        match sink_result {
+                            Ok(SinkResult::Ok) => Ok(AckDecision::Ack),
+                            Ok(SinkResult::Retry) | Err(_) => Ok(AckDecision::NoAckStop),
+                        }
                     }
                 })
                 .await;
@@ -292,5 +387,71 @@ pub async fn run(manifest_path: String) -> Result<()> {
         eprintln!("Reconnecting in {backoff}s...");
         tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
         backoff = (backoff * 2).min(max_backoff);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dedup_window_keep_first_drops_duplicates_until_window_expires() {
+        let mut window = DedupWindow::default();
+
+        assert!(
+            window
+                .should_deliver("github|push".to_string(), 100, 10, "keep_first")
+                .unwrap()
+        );
+        assert!(
+            !window
+                .should_deliver("github|push".to_string(), 105, 10, "keep_first")
+                .unwrap()
+        );
+        assert!(
+            window
+                .should_deliver("github|push".to_string(), 111, 10, "keep_first")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn dedup_window_keep_last_refreshes_duplicate_window() {
+        let mut window = DedupWindow::default();
+
+        assert!(
+            window
+                .should_deliver("github|push".to_string(), 100, 10, "keep_last")
+                .unwrap()
+        );
+        assert!(
+            !window
+                .should_deliver("github|push".to_string(), 105, 10, "keep_last")
+                .unwrap()
+        );
+        assert!(
+            !window
+                .should_deliver("github|push".to_string(), 111, 10, "keep_last")
+                .unwrap()
+        );
+        assert!(
+            window
+                .should_deliver("github|push".to_string(), 122, 10, "keep_last")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn dedup_window_rejects_unknown_strategy() {
+        let mut window = DedupWindow::default();
+        window
+            .should_deliver("github|push".to_string(), 100, 10, "keep_first")
+            .unwrap();
+
+        let err = window
+            .should_deliver("github|push".to_string(), 101, 10, "unknown")
+            .unwrap_err();
+
+        assert!(err.to_string().contains("unknown dedup strategy"));
     }
 }

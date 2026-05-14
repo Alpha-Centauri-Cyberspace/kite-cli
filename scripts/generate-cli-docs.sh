@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-OUT_REPO_README="$ROOT_DIR/crates/kite-cli/README.md"
-OUT_WEB_REF="$ROOT_DIR/apps/web/src/content/cli-reference.md"
+OUT_COMMANDS="$ROOT_DIR/docs/COMMANDS.md"
+OUT_WEB_REF="${KITE_WEB_CLI_REFERENCE:-}"
 TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT_DIR/target}"
 TARGET_TRIPLE="${CARGO_BUILD_TARGET:-}"
 if [ -n "$TARGET_TRIPLE" ]; then
@@ -14,8 +14,10 @@ else
   KITE_BIN="$TARGET_DIR/debug/kite"
 fi
 
-mkdir -p "$(dirname "$OUT_REPO_README")"
-mkdir -p "$(dirname "$OUT_WEB_REF")"
+mkdir -p "$(dirname "$OUT_COMMANDS")"
+if [ -n "$OUT_WEB_REF" ]; then
+  mkdir -p "$(dirname "$OUT_WEB_REF")"
+fi
 
 cargo build -p kite-cli >/dev/null
 
@@ -80,13 +82,28 @@ emit_help "kite skill list" skill list --help
 emit_help "kite skill publish" skill publish --help
 emit_help "kite skill search" skill search --help
 emit_help "kite skill registry-install" skill registry-install --help
+emit_help "kite skill export" skill export --help
+emit_help "kite queue" queue --help
+emit_help "kite queue list" queue list --help
+emit_help "kite queue show" queue show --help
+emit_help "kite queue replay" queue replay --help
+emit_help "kite queue flush" queue flush --help
+emit_help "kite queue stats" queue stats --help
+emit_help "kite agent" agent --help
+emit_help "kite agent register" agent register --help
+emit_help "kite agent send" agent send --help
+emit_help "kite agent listen" agent listen --help
 emit_help "kite logs" logs --help
 emit_help "kite status" status --help
 emit_help "kite update" update --help
 
-cp "$tmp_file" "$OUT_REPO_README"
-cp "$tmp_file" "$OUT_WEB_REF"
+cp "$tmp_file" "$OUT_COMMANDS"
+if [ -n "$OUT_WEB_REF" ]; then
+  cp "$tmp_file" "$OUT_WEB_REF"
+fi
 
 echo "Generated:"
-echo "  $OUT_REPO_README"
-echo "  $OUT_WEB_REF"
+echo "  $OUT_COMMANDS"
+if [ -n "$OUT_WEB_REF" ]; then
+  echo "  $OUT_WEB_REF"
+fi

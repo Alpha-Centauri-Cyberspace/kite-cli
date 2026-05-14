@@ -9,7 +9,7 @@ use crate::queue::EventStatus;
 use crate::sinks::Sink;
 use crate::sinks::SinkResult;
 use crate::sinks::proxy::ProxySink;
-use crate::ws_client;
+use crate::ws_client::{self, AckDecision};
 
 fn parse_routes(route_args: Vec<String>) -> Result<HashMap<String, String>> {
     let mut routes = HashMap::new();
@@ -99,7 +99,7 @@ pub async fn run(
         )
         .await
         {
-            Ok((_sink_ws, stream, last_seq, _assigned_client_id)) => {
+            Ok((sink_ws, stream, last_seq, _assigned_client_id)) => {
                 backoff = 1;
                 eprintln!("Connected (last_seq: {last_seq})");
 
@@ -108,7 +108,7 @@ pub async fn run(
                 let queue = Arc::clone(&queue);
                 let team_id = team_id.clone();
 
-                let result = ws_client::event_loop(stream, |_seq, event| {
+                let result = ws_client::event_loop_with_ack(sink_ws, stream, |_seq, event| {
                     let source_filter = source_filter.clone();
                     let sink = Arc::clone(&sink);
                     let queue = Arc::clone(&queue);
@@ -120,7 +120,7 @@ pub async fn run(
                             let event_type = event.ty();
                             let event_source = event.source().to_string();
                             if !event_type.contains(src) && !event_source.contains(src) {
-                                return Ok(());
+                                return Ok(AckDecision::Ack);
                             }
                         }
 
@@ -163,15 +163,23 @@ pub async fn run(
                                 Ok(SinkResult::Ok) => {
                                     q.update_status(seq, &EventStatus::Delivered, None)?
                                 }
-                                Ok(SinkResult::Retry) | Err(_) => q.update_status(
+                                Ok(SinkResult::Retry) => q.update_status(
                                     seq,
                                     &EventStatus::Failed,
                                     Some("sink returned retry"),
                                 )?,
+                                Err(ref e) => q.update_status(
+                                    seq,
+                                    &EventStatus::Failed,
+                                    Some(&e.to_string()),
+                                )?,
                             }
                         }
 
-                        Ok(())
+                        match result {
+                            Ok(SinkResult::Ok) => Ok(AckDecision::Ack),
+                            Ok(SinkResult::Retry) | Err(_) => Ok(AckDecision::NoAckStop),
+                        }
                     }
                 })
                 .await;
