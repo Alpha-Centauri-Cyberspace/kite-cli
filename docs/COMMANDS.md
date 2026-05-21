@@ -52,6 +52,7 @@ Quick Reference:
   github install       --repo --events --all-events --rotate-secret
   login                --server
   endpoints create     --source
+  endpoints rotate-secret --source --signing-secret
   endpoints deactivate --id
   keys create          --name --scopes --permissions --expires-at
   keys revoke          --id
@@ -236,10 +237,11 @@ Manage webhook endpoints
 Usage: kite endpoints <COMMAND>
 
 Commands:
-  list        List endpoints
-  create      Create or rotate endpoint credentials for a source (GitHub includes a one-time webhook secret)
-  deactivate  Deactivate endpoint by id
-  help        Print this message or the help of the given subcommand(s)
+  list           List endpoints
+  create         Create or rotate endpoint credentials for a source (GitHub includes a one-time webhook secret)
+  rotate-secret  Update an existing endpoint's provider signing secret without rotating its hook token
+  deactivate     Deactivate endpoint by id
+  help           Print this message or the help of the given subcommand(s)
 
 Options:
   -h, --help     Print help
@@ -282,6 +284,20 @@ Options:
           Print help
   -V, --version
           Print version
+```
+
+## `kite endpoints rotate-secret`
+
+```text
+Update an existing endpoint's provider signing secret without rotating its hook token
+
+Usage: kite endpoints rotate-secret --source <SOURCE> --signing-secret <SIGNING_SECRET>
+
+Options:
+      --source <SOURCE>                  Source name (e.g. linear, stripe)
+      --signing-secret <SIGNING_SECRET>  Provider-issued signing secret. Use `-` to read from stdin
+  -h, --help                             Print help
+  -V, --version                          Print version
 ```
 
 ## `kite endpoints deactivate`

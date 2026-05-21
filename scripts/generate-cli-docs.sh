@@ -71,6 +71,7 @@ emit_help "kite github install" github install --help
 emit_help "kite endpoints" endpoints --help
 emit_help "kite endpoints list" endpoints list --help
 emit_help "kite endpoints create" endpoints create --help
+emit_help "kite endpoints rotate-secret" endpoints rotate-secret --help
 emit_help "kite endpoints deactivate" endpoints deactivate --help
 emit_help "kite keys" keys --help
 emit_help "kite keys list" keys list --help
