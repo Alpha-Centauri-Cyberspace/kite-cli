@@ -22,6 +22,7 @@ Quick Reference:
   github install       --repo --events --all-events --rotate-secret
   login                --server
   endpoints create     --source
+  endpoints rotate-secret --source --signing-secret
   endpoints deactivate --id
   keys create          --name --scopes --permissions --expires-at
   keys revoke          --id
@@ -284,12 +285,56 @@ enum EndpointsCommand {
         #[arg(long)]
         signing_secret: Option<String>,
     },
+    /// Update an existing endpoint's provider signing secret without rotating its hook token
+    RotateSecret {
+        /// Source name (e.g. linear, stripe)
+        #[arg(long)]
+        source: String,
+        /// Provider-issued signing secret. Use `-` to read from stdin.
+        #[arg(long, required = true)]
+        signing_secret: Option<String>,
+    },
     /// Deactivate endpoint by id
     Deactivate {
         /// Endpoint id
         #[arg(long)]
         id: String,
     },
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::{Cli, Commands, EndpointsCommand};
+    use clap::Parser;
+
+    #[test]
+    fn parses_endpoint_signing_secret_rotation_command() {
+        let cli = Cli::try_parse_from([
+            "kite",
+            "endpoints",
+            "rotate-secret",
+            "--source",
+            "linear",
+            "--signing-secret",
+            "lin_wh_new_secret",
+        ])
+        .expect("parse rotate-secret command");
+
+        let Some(Commands::Endpoints { command }) = cli.command else {
+            panic!("expected endpoints command");
+        };
+
+        match command {
+            EndpointsCommand::RotateSecret {
+                source,
+                signing_secret,
+            } => {
+                assert_eq!(source, "linear");
+                assert_eq!(signing_secret.as_deref(), Some("lin_wh_new_secret"));
+            }
+            _ => panic!("expected rotate-secret subcommand"),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -539,6 +584,12 @@ async fn main() -> anyhow::Result<()> {
                     signing_secret,
                 )
                 .await?;
+            }
+            EndpointsCommand::RotateSecret {
+                source,
+                signing_secret,
+            } => {
+                commands::endpoints::rotate_secret(source, signing_secret).await?;
             }
             EndpointsCommand::Deactivate { id } => {
                 commands::endpoints::deactivate(id).await?;

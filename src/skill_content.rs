@@ -186,6 +186,7 @@ Scoring scripts follow the same convention but must output a single float betwee
 | `kite retry` | Retry failed events from DLQ |
 | `kite endpoints list` | List webhook endpoints |
 | `kite endpoints create` | Create/rotate endpoint credentials (--repo for auto-setup) |
+| `kite endpoints rotate-secret` | Update a provider signing secret without rotating the hook token |
 | `kite endpoints deactivate` | Deactivate an endpoint |
 | `kite keys list` | List API keys |
 | `kite keys create` | Create a new API key |

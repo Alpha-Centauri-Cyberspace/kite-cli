@@ -52,28 +52,7 @@ pub async fn create(
 ) -> Result<()> {
     rpc::ensure_permission(ApiPermission::Write, "kite endpoints create").await?;
 
-    let resolved_secret = match signing_secret.as_deref() {
-        Some("-") => {
-            let mut buf = String::new();
-            io::stdin()
-                .read_to_string(&mut buf)
-                .context("failed to read signing secret from stdin")?;
-            let trimmed = buf.trim().to_string();
-            if trimmed.is_empty() {
-                anyhow::bail!("--signing-secret - was provided but stdin was empty");
-            }
-            Some(trimmed)
-        }
-        Some(other) => {
-            let trimmed = other.trim().to_string();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        }
-        None => None,
-    };
+    let resolved_secret = resolve_signing_secret(signing_secret.as_deref(), &mut io::stdin())?;
 
     let mut params = serde_json::Map::new();
     params.insert(
@@ -202,6 +181,64 @@ pub async fn create(
     Ok(())
 }
 
+fn resolve_signing_secret(
+    signing_secret: Option<&str>,
+    reader: &mut dyn Read,
+) -> Result<Option<String>> {
+    match signing_secret {
+        Some("-") => {
+            let mut buf = String::new();
+            reader
+                .read_to_string(&mut buf)
+                .context("failed to read signing secret from stdin")?;
+            let trimmed = buf.trim().to_string();
+            if trimmed.is_empty() {
+                anyhow::bail!("--signing-secret - was provided but stdin was empty");
+            }
+            Ok(Some(trimmed))
+        }
+        Some(other) => {
+            let trimmed = other.trim().to_string();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed))
+            }
+        }
+        None => Ok(None),
+    }
+}
+
+pub async fn rotate_secret(source: String, signing_secret: Option<String>) -> Result<()> {
+    rpc::ensure_permission(ApiPermission::Write, "kite endpoints rotate-secret").await?;
+
+    let Some(signing_secret) = signing_secret else {
+        anyhow::bail!("--signing-secret is required; use --signing-secret - to read from stdin");
+    };
+    let resolved_secret = resolve_signing_secret(Some(&signing_secret), &mut io::stdin())?
+        .context("--signing-secret is required; use --signing-secret - to read from stdin")?;
+
+    let payload = rpc::call(
+        "hooks.rotate_secret",
+        serde_json::json!({
+            "source": source,
+            "webhook_secret": resolved_secret,
+        }),
+    )
+    .await?;
+    let hook_id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("-");
+    let source = payload
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("-");
+
+    println!("Updated signing secret:");
+    println!("- id: {hook_id}");
+    println!("- source: {source}");
+    println!("- signing_secret: stored (signature verification enabled)");
+    Ok(())
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct EndpointUrls {
     primary_webhook_url: String,
@@ -274,5 +311,15 @@ mod tests {
             urls.primary_webhook_url,
             "https://api.getkite.sh/hooks/team/generic/khk_secret"
         );
+    }
+
+    #[test]
+    fn signing_secret_can_be_read_from_stdin() {
+        let mut input = " lin_wh_new_secret \n".as_bytes();
+        let secret = resolve_signing_secret(Some("-"), &mut input)
+            .expect("secret resolved")
+            .expect("secret present");
+
+        assert_eq!(secret, "lin_wh_new_secret");
     }
 }
