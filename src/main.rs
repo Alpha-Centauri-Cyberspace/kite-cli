@@ -395,7 +395,7 @@ enum SkillCommand {
     List,
     /// Export the kite SKILL.md to agent skill directories
     Export {
-        /// Target platform: claude, agents, openclaw, or paperclip (default: claude)
+        /// Target platform: claude, agents, or openclaw (default: claude)
         #[arg(long)]
         format: Option<String>,
         /// Auto-detect all present agent skill directories and export to each
@@ -707,6 +707,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
     fn parses_skill_install_subcommand() {
@@ -727,5 +728,17 @@ mod tests {
 
         assert_eq!(cli.install_skill.as_deref(), Some("weather"));
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn skill_export_help_omits_obsolete_paperclip_platform() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("skill")
+            .and_then(|skill| skill.find_subcommand_mut("export"))
+            .map(|export| export.render_long_help().to_string())
+            .expect("skill export help is available");
+
+        assert!(!help.to_lowercase().contains("paperclip"));
     }
 }

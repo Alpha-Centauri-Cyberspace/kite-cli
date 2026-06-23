@@ -473,7 +473,7 @@ Export the kite SKILL.md to agent skill directories
 Usage: kite skill export [OPTIONS]
 
 Options:
-      --format <FORMAT>  Target platform: claude, agents, openclaw, or paperclip (default: claude)
+      --format <FORMAT>  Target platform: claude, agents, or openclaw (default: claude)
       --auto             Auto-detect all present agent skill directories and export to each
   -h, --help             Print help
   -V, --version          Print version

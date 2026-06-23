@@ -11,7 +11,6 @@ use crate::sinks::Sink;
 use crate::sinks::SinkResult;
 use crate::sinks::exec::ExecSink;
 use crate::sinks::mcp::{McpSink, McpSinkHandle};
-use crate::sinks::paperclip::{PaperclipSink, PaperclipSinkConfig};
 use crate::sinks::proxy::ProxySink;
 use crate::sinks::socket::SocketSink;
 use crate::sinks::stdout::StdoutSink;
@@ -25,7 +24,6 @@ enum SinkHandle {
     Socket(broadcast::Sender<String>),
     Exec(Arc<Mutex<ExecSink>>),
     Mcp(McpSinkHandle),
-    Paperclip(Arc<Mutex<PaperclipSink>>),
 }
 
 #[derive(Default)]
@@ -114,22 +112,6 @@ pub async fn run(manifest_path: String) -> Result<()> {
             let handle = mcp_sink.handle_pair();
             mcp_sink.start().await?;
             SinkHandle::Mcp(handle)
-        }
-        SinkConfig::Paperclip {
-            api_url,
-            company_id,
-            agent_id,
-        } => {
-            let paperclip_api_key =
-                std::env::var("PAPERCLIP_API_KEY").unwrap_or_else(|_| api_key.clone());
-            let mut paperclip_sink = PaperclipSink::new(PaperclipSinkConfig {
-                api_url: api_url.clone(),
-                api_key: paperclip_api_key,
-                company_id: company_id.clone(),
-                agent_id: agent_id.clone(),
-            });
-            paperclip_sink.start().await?;
-            SinkHandle::Paperclip(Arc::new(Mutex::new(paperclip_sink)))
         }
     };
 
@@ -340,10 +322,6 @@ pub async fn run(manifest_path: String) -> Result<()> {
                             SinkHandle::Mcp(handle) => {
                                 handle.push_event(&event).await;
                                 Ok(SinkResult::Ok)
-                            }
-                            SinkHandle::Paperclip(sink) => {
-                                let mut sink = sink.lock().await;
-                                sink.handle(&event).await
                             }
                         };
 

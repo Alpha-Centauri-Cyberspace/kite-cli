@@ -1,6 +1,6 @@
 //! Orchestration platform abstraction.
 //!
-//! Each platform (OpenClaw, Claude Code, Agents, Paperclip, …) implements
+//! Each platform (OpenClaw, Claude Code, Agents, …) implements
 //! [`OrchestrationPlatform`] so the CLI can install, export, and discover
 //! skills without hard-coding any single runtime.
 
@@ -45,7 +45,6 @@ pub trait OrchestrationPlatform {
 pub struct OpenClaw;
 pub struct ClaudeCode;
 pub struct AgentsFramework;
-pub struct Paperclip;
 
 impl OrchestrationPlatform for OpenClaw {
     fn key(&self) -> &str {
@@ -107,24 +106,6 @@ impl OrchestrationPlatform for AgentsFramework {
     }
 }
 
-impl OrchestrationPlatform for Paperclip {
-    fn key(&self) -> &str {
-        "paperclip"
-    }
-    fn display_name(&self) -> &str {
-        "Paperclip"
-    }
-    fn installer_bin(&self) -> &str {
-        "paperclipai"
-    }
-    fn default_skills_dir(&self) -> PathBuf {
-        PathBuf::from(".paperclip/skills")
-    }
-    fn is_home_relative(&self) -> bool {
-        false
-    }
-}
-
 // ── Registry ─────────────────────────────────────────────────────────────────
 
 /// Returns all built-in platforms in discovery order.
@@ -133,7 +114,6 @@ pub fn all_platforms() -> Vec<Box<dyn OrchestrationPlatform>> {
         Box::new(ClaudeCode),
         Box::new(AgentsFramework),
         Box::new(OpenClaw),
-        Box::new(Paperclip),
     ]
 }
 
@@ -177,4 +157,29 @@ fn home_dir() -> PathBuf {
     BaseDirs::new()
         .map(|b| b.home_dir().to_path_buf())
         .unwrap_or_else(|| PathBuf::from("~"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn built_in_platforms_omit_obsolete_paperclip_runtime() {
+        let keys = all_platforms()
+            .into_iter()
+            .map(|platform| platform.key().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(!keys.iter().any(|key| key == "paperclip"));
+    }
+
+    #[test]
+    fn platform_lookup_rejects_obsolete_paperclip_runtime() {
+        let error = match platform_by_key("paperclip") {
+            Ok(_) => panic!("paperclip should not be supported"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("unknown platform"));
+    }
 }

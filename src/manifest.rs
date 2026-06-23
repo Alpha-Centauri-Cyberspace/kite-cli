@@ -50,15 +50,6 @@ pub enum SinkConfig {
         #[serde(default = "default_buffer_size")]
         buffer_size: usize,
     },
-    Paperclip {
-        /// Paperclip API base URL.
-        api_url: String,
-        /// Paperclip company ID.
-        company_id: String,
-        /// Optional agent ID for targeted heartbeat triggers.
-        #[serde(default)]
-        agent_id: Option<String>,
-    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -318,6 +309,24 @@ mod tests {
             SinkConfig::Exec { command, .. } => assert_eq!(command, "./handle.sh"),
             _ => panic!("Expected Exec sink"),
         }
+    }
+
+    #[test]
+    fn obsolete_paperclip_sink_is_rejected() {
+        let json = r#"{
+            "name": "old-paperclip-app",
+            "subscriptions": [{"source": "github"}],
+            "sink": {
+                "type": "paperclip",
+                "api_url": "https://api.paperclip.ing",
+                "company_id": "company-123"
+            }
+        }"#;
+
+        let error =
+            serde_json::from_str::<Manifest>(json).expect_err("paperclip sink should not parse");
+
+        assert!(error.to_string().contains("unknown variant"));
     }
 
     #[test]

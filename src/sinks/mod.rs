@@ -1,6 +1,5 @@
 pub mod exec;
 pub mod mcp;
-pub mod paperclip;
 pub mod proxy;
 pub mod socket;
 pub mod stdout;
