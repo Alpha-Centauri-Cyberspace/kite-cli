@@ -1,297 +1,231 @@
-name: Auto Release
+name: Release CLI
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'src/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'scripts/generate-cli-docs.sh'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to release (e.g. v0.2.0). Leave empty to read the version from Cargo.toml.'
-        required: false
+        description: Existing protected release tag (vX.Y.Z)
+        required: true
+        type: string
 
-permissions:
-  contents: write
+run-name: Release Kite CLI ${{ inputs.tag }}
+
+permissions: {}
 
 concurrency:
-  group: auto-release-cli-main
+  group: cli-release-${{ inputs.tag }}
   cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Step 1: Create or resolve the release tag
-  auto-tag:
-    name: Resolve release tag
+  preflight:
+    name: Verify release source
     runs-on: blacksmith-2vcpu-ubuntu-2204
+    timeout-minutes: 10
+    permissions:
+      contents: read
     outputs:
-      tag: ${{ steps.tag.outputs.tag }}
-      release_created: ${{ steps.tag.outputs.release_created }}
-
+      tag: ${{ steps.source.outputs.tag }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      source_epoch: ${{ steps.source.outputs.source_epoch }}
+      published_at: ${{ steps.source.outputs.published_at }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out release history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Resolve tag
-        id: tag
+      - name: Resolve and verify the protected tag
+        id: source
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: bash
         run: |
           set -euo pipefail
-
-          # If manual trigger with explicit tag, use it directly.
-          if [ -n "${{ github.event.inputs.tag || '' }}" ]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
-            echo "release_created=true" >> "$GITHUB_OUTPUT"
-            echo "Using manually specified tag: ${{ github.event.inputs.tag }}"
-            exit 0
-          fi
-
-          # Read the version from Cargo.toml — this is the source of truth.
-          # Bumping Cargo.toml is what authors use to cut a release; the
-          # workflow does not auto-bump, because that hides minor/major
-          # bumps and silently advances on commits that shouldn't release.
-          version="$(awk -F'"' '/^version[[:space:]]*=/ { print $2; exit }' Cargo.toml)"
-          if [ -z "$version" ]; then
-            echo "::error::Could not parse 'version = \"...\"' from Cargo.toml"
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::Release tag must be clean semver vX.Y.Z."
             exit 1
-          fi
-
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Cargo.toml version '$version' is not a clean semver (X.Y.Z)"
-            exit 1
-          fi
-
-          target_tag="v${version}"
-          echo "Cargo.toml version: ${version} → target tag: ${target_tag}"
-
+          }
           git fetch --force --tags origin
-
-          # Already tagged on this exact commit? Nothing to do.
-          existing_tag="$(git tag --points-at "$GITHUB_SHA" --list "$target_tag" || true)"
-          if [ -n "$existing_tag" ]; then
-            echo "release_created=false" >> "$GITHUB_OUTPUT"
-            echo "tag=${existing_tag}" >> "$GITHUB_OUTPUT"
-            echo "Commit already tagged ${existing_tag}; skipping."
-            exit 0
-          fi
-
-          # Tag exists on a *different* commit? Author forgot to bump
-          # Cargo.toml. Fail loudly so we don't silently re-publish.
-          if git ls-remote --exit-code --tags origin "refs/tags/${target_tag}" >/dev/null 2>&1; then
-            echo "::error::Tag ${target_tag} already exists on a different commit."
-            echo "::error::Bump 'version' in Cargo.toml before merging to main."
+          git rev-parse --verify --quiet "refs/tags/${RELEASE_TAG}^{commit}" >/dev/null || {
+            echo "::error::Release tag ${RELEASE_TAG} does not exist."
             exit 1
-          fi
+          }
+          source_sha="$(git rev-list -n1 "refs/tags/${RELEASE_TAG}^{commit}")"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$source_sha" origin/main || {
+            echo "::error::Release tag is not reachable from origin/main."
+            exit 1
+          }
+          git checkout --detach "$source_sha"
+          python3 scripts/validate-release.py --tag "$RELEASE_TAG"
 
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+          printf 'source_epoch=%s\n' "$(git show -s --format=%ct "$source_sha")" >> "$GITHUB_OUTPUT"
+          printf 'published_at=%s\n' "$(git show -s --format=%cI "$source_sha")" >> "$GITHUB_OUTPUT"
 
-          git tag -a "$target_tag" "$GITHUB_SHA" -m "chore(release): ${target_tag}"
-
-          if git push origin "refs/tags/${target_tag}"; then
-            echo "release_created=true" >> "$GITHUB_OUTPUT"
-            echo "tag=${target_tag}" >> "$GITHUB_OUTPUT"
-            echo "Created and pushed ${target_tag}."
-            exit 0
-          fi
-
-          # Push race: another concurrent run created the same tag.
-          git tag -d "$target_tag" >/dev/null 2>&1 || true
-          git fetch --force --tags origin
-          if git ls-remote --exit-code --tags origin "refs/tags/${target_tag}" >/dev/null 2>&1; then
-            echo "Detected concurrent creation of ${target_tag}; treating as no-op."
-            echo "release_created=false" >> "$GITHUB_OUTPUT"
-            echo "tag=${target_tag}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "::error::Failed to push ${target_tag} for a non-race reason"
-          exit 1
-
-      - name: Summary
-        run: |
-          echo "### Auto Release CLI" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Tag: ${{ steps.tag.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Created: ${{ steps.tag.outputs.release_created }}" >> "$GITHUB_STEP_SUMMARY"
-
-  # Step 2: Build binaries for all targets
   build:
     name: Build ${{ matrix.target }}
-    needs: auto-tag
-    if: needs.auto-tag.outputs.release_created == 'true'
+    needs: preflight
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux build runs on Blacksmith jammy (Ubuntu 22.04, GLIBC 2.35) —
-          # matches kite-server's CI runner pool and keeps the published binary
-          # runnable on Ubuntu 22.04+, Debian 12+, RHEL 9+. Building on
-          # ubuntu-latest (now 24.04 / GLIBC 2.39) excludes most LTS distros.
           - target: x86_64-unknown-linux-gnu
             os: blacksmith-2vcpu-ubuntu-2204
             name: kite-linux-x86_64
           - target: aarch64-apple-darwin
             os: macos-latest
             name: kite-darwin-arm64
-
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Check out the tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ needs.preflight.outputs.source_sha }}
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.94.0
           targets: ${{ matrix.target }}
 
-      - name: Build
+      - name: Build locked release binary
         env:
-          KITE_VERSION: ${{ needs.auto-tag.outputs.tag }}
+          KITE_VERSION: ${{ needs.preflight.outputs.tag }}
+        shell: bash
         run: |
+          set -euo pipefail
           export KITE_VERSION="${KITE_VERSION#v}"
-          cargo build --release --target ${{ matrix.target }} -p kite-cli
+          cargo build --locked --release --target "${{ matrix.target }}"
 
-      # Guard against the regression that broke v0.1.2 on Ubuntu 22.04: if the
-      # build toolchain bumps and the binary's max required GLIBC creeps above
-      # the floor we promise users, fail the release loudly instead of shipping
-      # something that won't start on most LTS distros.
       - name: Verify Linux GLIBC floor
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         env:
           KITE_GLIBC_FLOOR: "2.35"
+        shell: bash
         run: |
           set -euo pipefail
-          BIN="target/${{ matrix.target }}/release/kite"
-          MAX_GLIBC="$(strings "$BIN" | grep -oE '^GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -n1 || true)"
-          if [ -z "$MAX_GLIBC" ]; then
-            echo "::error::No GLIBC_* symbols found in $BIN — unexpected on a glibc target."
+          bin="target/${{ matrix.target }}/release/kite"
+          max_glibc="$(strings "$bin" | grep -oE '^GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -n1 || true)"
+          [[ -n "$max_glibc" ]] || {
+            echo "::error::No GLIBC_* symbols found in $bin."
             exit 1
-          fi
-          MAX_VER="${MAX_GLIBC#GLIBC_}"
-          echo "max required: GLIBC_${MAX_VER}; floor: GLIBC_${KITE_GLIBC_FLOOR}"
-          # printf | sort -V picks the highest of (floor, actual). If actual wins,
-          # the binary requires a newer glibc than the floor allows.
-          HIGHEST="$(printf '%s\n%s\n' "$KITE_GLIBC_FLOOR" "$MAX_VER" | sort -V | tail -n1)"
-          if [ "$HIGHEST" != "$KITE_GLIBC_FLOOR" ]; then
-            echo "::error::Binary requires GLIBC_${MAX_VER}, above the GLIBC_${KITE_GLIBC_FLOOR} floor."
-            echo "::error::This binary will fail on Ubuntu 22.04 / Debian 12 / RHEL 9."
-            echo "::error::Either pin the build runner to an older image, switch to a static MUSL target,"
-            echo "::error::or raise KITE_GLIBC_FLOOR if the new floor is acceptable."
+          }
+          max_version="${max_glibc#GLIBC_}"
+          highest="$(printf '%s\n%s\n' "$KITE_GLIBC_FLOOR" "$max_version" | sort -V | tail -n1)"
+          [[ "$highest" == "$KITE_GLIBC_FLOOR" ]] || {
+            echo "::error::Binary requires GLIBC_${max_version}, above the GLIBC_${KITE_GLIBC_FLOOR} floor."
             exit 1
-          fi
+          }
 
-      - name: Package
+      - name: Create reproducible archive and checksum
         run: |
-          cd target/${{ matrix.target }}/release
-          tar -czvf ../../../${{ matrix.name }}.tar.gz kite
-          cd ../../..
-          shasum -a 256 ${{ matrix.name }}.tar.gz > ${{ matrix.name }}.tar.gz.sha256
+          python3 scripts/package-release.py \
+            --binary "target/${{ matrix.target }}/release/kite" \
+            --output "${{ matrix.name }}.tar.gz" \
+            --source-date-epoch "${{ needs.preflight.outputs.source_epoch }}"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload verified build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.name }}
+          if-no-files-found: error
           path: |
             ${{ matrix.name }}.tar.gz
             ${{ matrix.name }}.tar.gz.sha256
 
-  # Step 3: Create GitHub release and upload to R2
   release:
-    name: Publish release
-    needs: [auto-tag, build]
+    name: Publish approved release
+    needs: [preflight, build]
     runs-on: blacksmith-2vcpu-ubuntu-2204
-
+    timeout-minutes: 25
+    environment: release
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out the tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.preflight.outputs.source_sha }}
+          persist-credentials: false
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - name: Download all build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
 
       - name: Flatten artifacts
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p release
-          find artifacts -type f -name "*.tar.gz*" -exec mv {} release/ \;
-          ls -la release/
+          find artifacts -type f -name '*.tar.gz*' -exec mv '{}' release/ \;
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
-        with:
-          tag_name: ${{ needs.auto-tag.outputs.tag }}
-          files: release/*
-          generate_release_notes: true
-          draft: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Validate storage config
+      - name: Validate storage configuration
         env:
           R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
           PUBLIC_BASE_URL: ${{ secrets.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
+        shell: bash
         run: |
           set -euo pipefail
-          missing=0
-          for var in R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET PUBLIC_BASE_URL; do
-            if [ -z "${!var:-}" ]; then
-              echo "::error::$var is not configured"
-              missing=1
-            fi
+          for variable in R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET PUBLIC_BASE_URL; do
+            [[ -n "${!variable:-}" ]] || {
+              echo "::error::$variable is not configured"
+              exit 1
+            }
           done
-          if [ "$missing" -ne 0 ]; then
-            echo "Configure Cloudflare R2 secrets before publishing releases."
-            exit 1
-          fi
 
-      - name: Build release manifest
+      - name: Build and validate deterministic release manifest
         env:
           PUBLIC_BASE_URL: ${{ secrets.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
-          RELEASE_TAG: ${{ needs.auto-tag.outputs.tag }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          PUBLISHED_AT: ${{ needs.preflight.outputs.published_at }}
+        shell: bash
         run: |
           set -euo pipefail
-          TAG="${RELEASE_TAG}"
-          BASE_URL="${PUBLIC_BASE_URL%/}"
-          PUBLISHED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-
+          base_url="${PUBLIC_BASE_URL%/}"
           assets='[]'
           for file in release/*.tar.gz; do
             name="$(basename "$file")"
             sha_file="release/${name}.sha256"
-            if [ ! -f "$sha_file" ]; then
-              echo "::error::Missing checksum file for $name"
+            [[ -f "$sha_file" ]] || {
+              echo "::error::Missing checksum for $name"
               exit 1
-            fi
+            }
             sha="$(cut -d' ' -f1 "$sha_file" | tr -d '\n')"
             size="$(stat -c%s "$file")"
-            url="${BASE_URL}/releases/${TAG}/${name}"
-            asset_json="$(jq -nc \
-              --arg name "$name" \
-              --arg sha "$sha" \
-              --arg url "$url" \
-              --argjson size "$size" \
-              '{name:$name,size:$size,sha256:$sha,download_url:$url}')"
-            assets="$(jq -nc --argjson arr "$assets" --argjson item "$asset_json" '$arr + [$item]')"
+            url="${base_url}/releases/${RELEASE_TAG}/${name}"
+            item="$(jq -nc --arg name "$name" --arg sha "$sha" --arg url "$url" --argjson size "$size" '{name:$name,size:$size,sha256:$sha,download_url:$url}')"
+            assets="$(jq -nc --argjson values "$assets" --argjson item "$item" '$values + [$item]')"
           done
-
-          jq -nc \
-            --arg tag "$TAG" \
+          jq -S -nc \
+            --arg tag "$RELEASE_TAG" \
+            --arg source_sha "$SOURCE_SHA" \
             --arg published_at "$PUBLISHED_AT" \
             --argjson assets "$assets" \
-            '{tag_name:$tag,published_at:$published_at,assets:$assets}' \
-            > release/latest.json
+            '{tag_name:$tag,source_sha:$source_sha,published_at:$published_at,assets:$assets}' \
+            > release/manifest.json
+          cp release/manifest.json release/latest.json
+          python3 scripts/validate-release.py \
+            --tag "$RELEASE_TAG" \
+            --source-sha "$SOURCE_SHA" \
+            --manifest release/manifest.json \
+            --artifacts-dir release
 
-          cp release/latest.json release/manifest.json
-          jq . release/latest.json
-
-      - name: Upload to R2
+      - name: Upload or verify immutable R2 objects
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
@@ -299,63 +233,100 @@ jobs:
           AWS_EC2_METADATA_DISABLED: "true"
           R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
           R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
-          RELEASE_TAG: ${{ needs.auto-tag.outputs.tag }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+        shell: bash
         run: |
           set -euo pipefail
-          TAG="${RELEASE_TAG}"
-          ENDPOINT_URL="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          VERSION_PREFIX="s3://${R2_BUCKET}/releases/${TAG}"
-
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          prefix="s3://${R2_BUCKET}/releases/${RELEASE_TAG}"
+          verify_or_upload() {
+            local source="$1"
+            local destination="$2"
+            local cache_control="$3"
+            local existing="${RUNNER_TEMP}/existing-$(basename "$source")"
+            if aws s3 cp "$destination" "$existing" --endpoint-url "$endpoint" --no-progress >/dev/null 2>&1; then
+              cmp "$source" "$existing" || {
+                echo "::error::Immutable object differs: $destination"
+                exit 1
+              }
+              echo "Verified existing immutable object: $destination"
+            else
+              aws s3 cp "$source" "$destination" \
+                --endpoint-url "$endpoint" \
+                --cache-control "$cache_control" \
+                --no-progress
+            fi
+          }
           for file in release/*.tar.gz release/*.tar.gz.sha256; do
-            name="$(basename "$file")"
-            aws s3 cp "$file" "${VERSION_PREFIX}/${name}" \
-              --endpoint-url "$ENDPOINT_URL" \
-              --cache-control "public, max-age=31536000, immutable" \
-              --no-progress
+            verify_or_upload "$file" "${prefix}/$(basename "$file")" "public, max-age=31536000, immutable"
           done
+          verify_or_upload release/manifest.json "${prefix}/manifest.json" "public, max-age=31536000, immutable"
 
-          aws s3 cp release/manifest.json "${VERSION_PREFIX}/manifest.json" \
-            --endpoint-url "$ENDPOINT_URL" \
-            --cache-control "public, max-age=31536000, immutable" \
-            --content-type "application/json" \
-            --no-progress
-
-          aws s3 cp release/latest.json "s3://${R2_BUCKET}/releases/latest.json" \
-            --endpoint-url "$ENDPOINT_URL" \
-            --cache-control "public, max-age=60, stale-while-revalidate=300" \
-            --content-type "application/json" \
-            --no-progress
-
-      - name: Verify release
+      - name: Verify public immutable release artifacts
         env:
           PUBLIC_BASE_URL: ${{ secrets.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
-          RELEASE_TAG: ${{ needs.auto-tag.outputs.tag }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+          SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
+        shell: bash
         run: |
           set -euo pipefail
-          BASE_URL="${PUBLIC_BASE_URL%/}"
-          MANIFEST_URL="${BASE_URL}/releases/latest.json"
-
+          base_url="${PUBLIC_BASE_URL%/}"
+          manifest_url="${base_url}/releases/${RELEASE_TAG}/manifest.json"
           for attempt in 1 2 3 4 5 6; do
-            if curl -fsSL "$MANIFEST_URL" -o /tmp/kite-latest.json; then
-              break
-            fi
-            echo "public manifest not available yet (attempt ${attempt}), retrying..."
+            curl -fsSL "$manifest_url" -o /tmp/kite-manifest.json && break
             sleep 10
           done
+          python3 scripts/validate-release.py \
+            --tag "$RELEASE_TAG" \
+            --source-sha "$SOURCE_SHA" \
+            --manifest /tmp/kite-manifest.json
+          jq -r '.assets[] | [.download_url, .sha256] | @tsv' /tmp/kite-manifest.json |
+            while IFS=$'\t' read -r url expected; do
+              artifact="${RUNNER_TEMP}/$(basename "$url")"
+              curl -fsSL "$url" -o "$artifact"
+              actual="$(sha256sum "$artifact" | cut -d' ' -f1)"
+              [[ "$actual" == "$expected" ]] || {
+                echo "::error::Public checksum mismatch for $url"
+                exit 1
+              }
+            done
 
-          if [ ! -s /tmp/kite-latest.json ]; then
-            echo "::error::failed to fetch public manifest from ${MANIFEST_URL}"
-            exit 1
-          fi
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          files: |
+            release/*.tar.gz
+            release/*.tar.gz.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true
 
-          jq -e --arg tag "${RELEASE_TAG}" '.tag_name == $tag' /tmp/kite-latest.json >/dev/null
-          jq -r '.assets[].download_url' /tmp/kite-latest.json | while IFS= read -r url; do
-            curl -fsSI "$url" >/dev/null
+      - name: Advance and verify the mutable latest pointer
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_EC2_METADATA_DISABLED: "true"
+          R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
+          PUBLIC_BASE_URL: ${{ secrets.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          aws s3 cp release/latest.json "s3://${R2_BUCKET}/releases/latest.json" \
+            --endpoint-url "$endpoint" \
+            --cache-control "public, max-age=60, stale-while-revalidate=300" \
+            --content-type application/json \
+            --no-progress
+          latest_url="${PUBLIC_BASE_URL%/}/releases/latest.json"
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsSL "$latest_url" -o /tmp/kite-latest.json &&
+               jq -e --arg tag "$RELEASE_TAG" '.tag_name == $tag' /tmp/kite-latest.json >/dev/null; then
+              exit 0
+            fi
+            sleep 10
           done
-
-          echo "### Release Published" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Tag: ${RELEASE_TAG}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Manifest: ${MANIFEST_URL}" >> "$GITHUB_STEP_SUMMARY"
-          jq -r '.assets[].download_url' /tmp/kite-latest.json | while IFS= read -r url; do
-            echo "- Asset: ${url}" >> "$GITHUB_STEP_SUMMARY"
-          done
+          echo "::error::Latest release pointer did not converge to $RELEASE_TAG"
+          exit 1
