@@ -14,7 +14,8 @@ brew tap alpha-centauri-cyberspace/kite
 brew install kite
 ```
 
-Homebrew packages are currently available for macOS on Apple Silicon and Linux on x86_64.
+Homebrew packages are currently available for macOS on Apple Silicon and Linux
+on x86_64 with glibc 2.34 or newer.
 
 ### Prebuilt binary
 
@@ -24,7 +25,7 @@ Download the archive and matching `.sha256` file for the latest release from
 | Platform | Release asset |
 |---|---|
 | macOS, Apple Silicon (`arm64`) | `kite-darwin-arm64.tar.gz` |
-| Linux, x86_64 | `kite-linux-x86_64.tar.gz` |
+| Linux, x86_64 (glibc 2.34+) | `kite-linux-x86_64.tar.gz` |
 
 Verify the checksum before extracting the archive. For example, on Linux x86_64:
 

@@ -24,8 +24,8 @@ project; Kite CLI releases only through GitHub Releases, the download mirror,
 and Homebrew.
 
 A maintainer first merges a reviewed version bump, creates a protected `vX.Y.Z`
-tag on that merged commit, and manually dispatches `auto-release.yml`. The
-approval-gated workflow:
+tag on that merged commit, and manually dispatches `auto-release.yml` with that
+tag selected as the workflow ref. The approval-gated workflow:
 
 1. Validates that `Cargo.toml`, `Cargo.lock`, and the `vX.Y.Z` tag agree.
 2. Confirms the tag is reachable from `main` and builds that exact source.
@@ -38,9 +38,10 @@ approval-gated workflow:
    versioned manifest and open a `Formula/kite.rb` pull request in
    [`homebrew-kite`](https://github.com/Alpha-Centauri-Cyberspace/homebrew-kite).
 
-The workflow accepts only an existing tag whose version matches the checked-in
-package metadata; it never creates tags, invents versions, or pushes directly
-to the Homebrew tap's default branch.
+Both release workflows must be dispatched with the existing tag selected as the
+workflow ref. The tag's version must match the checked-in package metadata; the
+workflows never create tags, invent versions, or push directly to the Homebrew
+tap's default branch.
 
 ## Filing issues
 

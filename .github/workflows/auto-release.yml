@@ -2,18 +2,15 @@ name: Release CLI
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing protected release tag (vX.Y.Z)
-        required: true
-        type: string
 
-run-name: Release Kite CLI ${{ inputs.tag }}
+run-name: Release Kite CLI ${{ github.ref_name }}
 
 permissions: {}
 
 concurrency:
-  group: cli-release-${{ inputs.tag }}
+  # Serialize all releases so an older run cannot race a newer run and move
+  # releases/latest.json backwards after both pass preflight.
+  group: cli-release
   cancel-in-progress: false
 
 env:
@@ -41,10 +38,14 @@ jobs:
       - name: Resolve and verify the protected tag
         id: source
         env:
-          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.ref_name }}
         shell: bash
         run: |
           set -euo pipefail
+          [[ "$GITHUB_REF_TYPE" == "tag" ]] || {
+            echo "::error::Dispatch this workflow from an existing v* tag."
+            exit 1
+          }
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
             echo "::error::Release tag must be clean semver vX.Y.Z."
             exit 1
@@ -110,7 +111,7 @@ jobs:
       - name: Verify Linux GLIBC floor
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         env:
-          KITE_GLIBC_FLOOR: "2.35"
+          KITE_GLIBC_FLOOR: "2.34"
         shell: bash
         run: |
           set -euo pipefail
@@ -238,11 +239,12 @@ jobs:
         run: |
           set -euo pipefail
           endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-          prefix="s3://${R2_BUCKET}/releases/${RELEASE_TAG}"
           verify_or_upload() {
             local source="$1"
-            local destination="$2"
+            local key="$2"
             local cache_control="$3"
+            local content_type="$4"
+            local destination="s3://${R2_BUCKET}/${key}"
             local existing="${RUNNER_TEMP}/existing-$(basename "$source")"
             if aws s3 cp "$destination" "$existing" --endpoint-url "$endpoint" --no-progress >/dev/null 2>&1; then
               cmp "$source" "$existing" || {
@@ -251,16 +253,30 @@ jobs:
               }
               echo "Verified existing immutable object: $destination"
             else
-              aws s3 cp "$source" "$destination" \
+              # A failed read is not proof that the key is absent. Create it
+              # conditionally so a transient/auth failure can never overwrite
+              # an existing immutable release object.
+              aws s3api put-object \
+                --bucket "$R2_BUCKET" \
+                --key "$key" \
+                --body "$source" \
+                --if-none-match '*' \
                 --endpoint-url "$endpoint" \
                 --cache-control "$cache_control" \
-                --no-progress
+                --content-type "$content_type" \
+                >/dev/null || {
+                  echo "::error::Could not verify or conditionally create immutable object: $destination"
+                  exit 1
+                }
             fi
           }
-          for file in release/*.tar.gz release/*.tar.gz.sha256; do
-            verify_or_upload "$file" "${prefix}/$(basename "$file")" "public, max-age=31536000, immutable"
+          for file in release/*.tar.gz; do
+            verify_or_upload "$file" "releases/${RELEASE_TAG}/$(basename "$file")" "public, max-age=31536000, immutable" "application/gzip"
           done
-          verify_or_upload release/manifest.json "${prefix}/manifest.json" "public, max-age=31536000, immutable"
+          for file in release/*.tar.gz.sha256; do
+            verify_or_upload "$file" "releases/${RELEASE_TAG}/$(basename "$file")" "public, max-age=31536000, immutable" "text/plain"
+          done
+          verify_or_upload release/manifest.json "releases/${RELEASE_TAG}/manifest.json" "public, max-age=31536000, immutable" "application/json"
 
       - name: Verify public immutable release artifacts
         env:

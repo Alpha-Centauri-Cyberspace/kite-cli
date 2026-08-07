@@ -14,6 +14,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 PACKAGE_SCRIPT = REPO / "scripts" / "package-release.py"
 VALIDATE_SCRIPT = REPO / "scripts" / "validate-release.py"
+RELEASE_WORKFLOW = REPO / ".github" / "workflows" / "auto-release.yml"
 ASSETS = ("kite-darwin-arm64.tar.gz", "kite-linux-x86_64.tar.gz")
 SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
 
@@ -133,6 +134,21 @@ class ReleaseToolsTest(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("unsafe characters", result.stderr)
+
+    def test_release_workflow_serializes_latest_pointer_updates(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("group: cli-release\n", workflow)
+        self.assertNotIn("group: cli-release-${{ inputs.tag }}", workflow)
+
+    def test_release_workflow_conditionally_creates_immutable_objects(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        immutable_step = workflow.split(
+            "- name: Upload or verify immutable R2 objects", maxsplit=1
+        )[1].split("- name: Verify public immutable release artifacts", maxsplit=1)[0]
+
+        self.assertIn("--if-none-match '*'", immutable_step)
+        self.assertNotIn('aws s3 cp "$source" "$destination"', immutable_step)
 
 
 if __name__ == "__main__":

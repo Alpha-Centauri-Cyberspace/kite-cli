@@ -2,18 +2,16 @@ name: Prepare Homebrew formula PR
 
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Existing CLI release tag (vX.Y.Z)'
-        required: true
-        type: string
 
-run-name: Prepare Homebrew formula for ${{ inputs.tag }}
+run-name: Prepare Homebrew formula for ${{ github.ref_name }}
 
 permissions: {}
 
+env:
+  LINUX_GLIBC_FLOOR: "2.34"
+
 concurrency:
-  group: homebrew-formula-${{ inputs.tag }}
+  group: homebrew-formula-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -33,9 +31,13 @@ jobs:
       - name: Resolve release tag
         id: tag
         env:
-          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          [[ "$GITHUB_REF_TYPE" == "tag" ]] || {
+            echo "::error::Dispatch this workflow from an existing v* tag."
+            exit 1
+          }
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
             echo "::error::Release tag must be clean semver vX.Y.Z."
             exit 1
@@ -129,6 +131,9 @@ jobs:
             end
 
             def install
+              if OS.linux? && OS::Linux::Glibc.system_version < Version.new("${LINUX_GLIBC_FLOOR}")
+                odie "Kite requires glibc ${LINUX_GLIBC_FLOOR} or newer on Linux."
+              end
               bin.install "kite"
             end
 
