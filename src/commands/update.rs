@@ -10,6 +10,10 @@ const DEFAULT_UPDATE_SERVER: &str = "https://downloads.getkite.sh";
 const FALLBACK_UPDATE_SERVER: &str = "https://pub-8c89023eee8443d0acfbb4cdc0d65494.r2.dev";
 
 pub async fn run(server: Option<String>, check: bool, force: bool) -> Result<()> {
+    // Reject unsupported hosts before contacting the update service. A check is
+    // still part of self-update and must not imply that an unpublished target
+    // can be installed.
+    let asset = detect_asset_name()?;
     let base = server
         .unwrap_or_else(|| DEFAULT_UPDATE_SERVER.to_string())
         .trim()
@@ -17,12 +21,13 @@ pub async fn run(server: Option<String>, check: bool, force: bool) -> Result<()>
         .to_string();
     let current_version = env!("CARGO_PKG_VERSION").to_string();
 
-    let (latest, effective_base) = fetch_latest_release(&base).await?;
+    let latest = fetch_latest_release(&base).await?;
     let latest_tag = latest
         .get("tag_name")
         .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let latest_version = latest_tag.trim_start_matches('v');
+        .context("update manifest is missing string field 'tag_name'")?;
+    let latest_version = parse_release_tag(latest_tag)?;
+    let (download_url, expected_sha256) = resolve_release_asset(&latest, latest_tag, &asset)?;
 
     let cmp = compare_versions(&current_version, latest_version);
     if check {
@@ -51,10 +56,6 @@ pub async fn run(server: Option<String>, check: bool, force: bool) -> Result<()>
         return Ok(());
     }
 
-    let asset = detect_asset_name()?;
-    let download_url = resolve_asset_download_url(&latest, &effective_base, latest_tag, &asset);
-    let expected_sha256 =
-        resolve_asset_sha256(&latest, &asset).or(fetch_sha256_sidecar(&download_url).await);
     eprintln!("Downloading {latest_tag} ({asset})...");
 
     let tmp_dir = std::env::temp_dir().join(format!("kite-update-{}", Uuid::now_v7()));
@@ -71,16 +72,14 @@ pub async fn run(server: Option<String>, check: bool, force: bool) -> Result<()>
         .await
         .context("failed reading update payload")?;
 
-    if let Some(expected) = expected_sha256 {
-        let actual = sha256_hex(&bytes);
-        if actual != expected {
-            bail!(
-                "download checksum mismatch for {}: expected={} actual={}",
-                asset,
-                expected,
-                actual
-            );
-        }
+    let actual = sha256_hex(&bytes);
+    if actual != expected_sha256 {
+        bail!(
+            "download checksum mismatch for {}: expected={} actual={}",
+            asset,
+            expected_sha256,
+            actual
+        );
     }
 
     std::fs::write(&tar_path, &bytes).context("failed writing downloaded archive")?;
@@ -136,10 +135,10 @@ pub async fn run(server: Option<String>, check: bool, force: bool) -> Result<()>
     Ok(())
 }
 
-async fn fetch_latest_release(base: &str) -> Result<(Value, String)> {
+async fn fetch_latest_release(base: &str) -> Result<Value> {
     let manifest_url = format!("{base}/releases/latest.json");
     match fetch_json(&manifest_url).await {
-        Ok(json) => Ok((json, base.to_string())),
+        Ok(json) => Ok(json),
         Err(primary_error) => {
             if base == FALLBACK_UPDATE_SERVER {
                 return Err(primary_error);
@@ -147,7 +146,7 @@ async fn fetch_latest_release(base: &str) -> Result<(Value, String)> {
 
             let fallback_manifest_url = format!("{FALLBACK_UPDATE_SERVER}/releases/latest.json");
             match fetch_json(&fallback_manifest_url).await {
-                Ok(json) => Ok((json, FALLBACK_UPDATE_SERVER.to_string())),
+                Ok(json) => Ok(json),
                 Err(_) => Err(primary_error),
             }
         }
@@ -178,56 +177,64 @@ async fn fetch_json(url: &str) -> Result<Value> {
     serde_json::from_str::<Value>(&body).context("failed to parse update metadata JSON")
 }
 
-fn resolve_asset_download_url(latest: &Value, base: &str, latest_tag: &str, asset: &str) -> String {
-    if let Some(asset_obj) = latest
-        .get("assets")
-        .and_then(Value::as_array)
-        .and_then(|assets| {
-            assets
-                .iter()
-                .find(|item| item.get("name").and_then(Value::as_str) == Some(asset))
-        })
+fn parse_release_tag(tag: &str) -> Result<&str> {
+    let version = tag
+        .strip_prefix('v')
+        .context("update manifest tag_name must have a 'v' prefix")?;
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() != 3
+        || parts
+            .iter()
+            .any(|part| part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()))
     {
-        for key in [
-            "download_url",
-            "website_download_url",
-            "url",
-            "github_download_url",
-        ] {
-            if let Some(value) = asset_obj.get(key).and_then(Value::as_str)
-                && !value.trim().is_empty()
-            {
-                return value.to_string();
-            }
-        }
+        bail!("update manifest tag_name must be clean semver vX.Y.Z, got {tag}");
     }
-
-    format!("{base}/releases/{latest_tag}/{asset}")
+    Ok(version)
 }
 
-fn resolve_asset_sha256(latest: &Value, asset: &str) -> Option<String> {
-    let value = latest
+fn resolve_release_asset(
+    latest: &Value,
+    latest_tag: &str,
+    asset: &str,
+) -> Result<(String, String)> {
+    let assets = latest
         .get("assets")
         .and_then(Value::as_array)
-        .and_then(|assets| {
-            assets
-                .iter()
-                .find(|item| item.get("name").and_then(Value::as_str) == Some(asset))
-        })
-        .and_then(|item| item.get("sha256").and_then(Value::as_str))?;
-
-    normalize_sha256(value)
-}
-
-async fn fetch_sha256_sidecar(download_url: &str) -> Option<String> {
-    let sidecar_url = format!("{download_url}.sha256");
-    let response = reqwest::get(&sidecar_url).await.ok()?;
-    if !response.status().is_success() {
-        return None;
+        .context("update manifest is missing array field 'assets'")?;
+    let mut matches = assets
+        .iter()
+        .filter(|item| item.get("name").and_then(Value::as_str) == Some(asset));
+    let asset_obj = matches
+        .next()
+        .with_context(|| format!("update manifest has no asset named {asset}"))?;
+    if matches.next().is_some() {
+        bail!("update manifest contains duplicate asset named {asset}");
     }
-    let body = response.text().await.ok()?;
-    let token = body.split_whitespace().next()?;
-    normalize_sha256(token)
+
+    let download_url = asset_obj
+        .get("download_url")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .with_context(|| format!("update manifest asset {asset} is missing download_url"))?;
+    let parsed = url::Url::parse(download_url)
+        .with_context(|| format!("update manifest asset {asset} has an invalid download_url"))?;
+    if parsed.scheme() != "https" {
+        bail!("update manifest asset {asset} download_url must use HTTPS");
+    }
+    let expected_suffix = format!("/releases/{latest_tag}/{asset}");
+    if !parsed.path().ends_with(&expected_suffix) {
+        bail!(
+            "update manifest asset {asset} download_url must reference immutable path {expected_suffix}"
+        );
+    }
+
+    let checksum = asset_obj
+        .get("sha256")
+        .and_then(Value::as_str)
+        .and_then(normalize_sha256)
+        .with_context(|| format!("update manifest asset {asset} is missing a valid sha256"))?;
+
+    Ok((download_url.to_string(), checksum))
 }
 
 fn normalize_sha256(value: &str) -> Option<String> {
@@ -245,20 +252,17 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn detect_asset_name() -> Result<String> {
-    let os = match std::env::consts::OS {
-        "macos" => "darwin",
-        "linux" => "linux",
-        other => bail!("unsupported OS for self-update: {other}"),
-    };
+    release_asset_name(std::env::consts::OS, std::env::consts::ARCH).map(str::to_string)
+}
 
-    let arch = match std::env::consts::ARCH {
-        "x86_64" => "x86_64",
-        "aarch64" => "arm64",
-        "arm64" => "arm64",
-        other => bail!("unsupported architecture for self-update: {other}"),
-    };
-
-    Ok(format!("kite-{os}-{arch}.tar.gz"))
+fn release_asset_name(os: &str, arch: &str) -> Result<&'static str> {
+    match (os, arch) {
+        ("macos", "aarch64" | "arm64") => Ok("kite-darwin-arm64.tar.gz"),
+        ("linux", "x86_64") => Ok("kite-linux-x86_64.tar.gz"),
+        _ => bail!(
+            "no prebuilt Kite update is published for {os}/{arch}; supported release targets are macOS/arm64 and Linux/x86_64"
+        ),
+    }
 }
 
 fn install_binary(source: &Path, target: &Path) -> Result<()> {
@@ -359,7 +363,10 @@ fn parse_semver_like(value: &str) -> Vec<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_version_from_output;
+    use super::{
+        extract_version_from_output, parse_release_tag, release_asset_name, resolve_release_asset,
+    };
+    use serde_json::json;
 
     #[test]
     fn parses_standard_version_output() {
@@ -375,5 +382,88 @@ mod tests {
             extract_version_from_output("kite v0.1.5\n"),
             Some("0.1.5".to_string())
         );
+    }
+
+    #[test]
+    fn maps_only_published_release_targets() {
+        assert_eq!(
+            release_asset_name("macos", "aarch64").unwrap(),
+            "kite-darwin-arm64.tar.gz"
+        );
+        assert_eq!(
+            release_asset_name("linux", "x86_64").unwrap(),
+            "kite-linux-x86_64.tar.gz"
+        );
+
+        assert!(release_asset_name("macos", "x86_64").is_err());
+        assert!(release_asset_name("linux", "aarch64").is_err());
+        assert!(release_asset_name("windows", "x86_64").is_err());
+    }
+
+    #[test]
+    fn accepts_only_clean_release_tags() {
+        assert_eq!(parse_release_tag("v0.2.2").unwrap(), "0.2.2");
+        assert!(parse_release_tag("0.2.2").is_err());
+        assert!(parse_release_tag("v0.2").is_err());
+        assert!(parse_release_tag("v0.2.2-beta.1").is_err());
+    }
+
+    #[test]
+    fn resolves_asset_only_from_immutable_manifest_entry() {
+        let manifest = json!({
+            "assets": [{
+                "name": "kite-linux-x86_64.tar.gz",
+                "sha256": "2ec5a95dc4a9bc70ec73de02d375ceb2adc6d05dbabd9d0a3aeb5feb6bd40692",
+                "download_url": "https://downloads.example/releases/v0.2.2/kite-linux-x86_64.tar.gz"
+            }]
+        });
+
+        let (url, checksum) =
+            resolve_release_asset(&manifest, "v0.2.2", "kite-linux-x86_64.tar.gz").unwrap();
+        assert_eq!(
+            url,
+            "https://downloads.example/releases/v0.2.2/kite-linux-x86_64.tar.gz"
+        );
+        assert_eq!(
+            checksum,
+            "2ec5a95dc4a9bc70ec73de02d375ceb2adc6d05dbabd9d0a3aeb5feb6bd40692"
+        );
+    }
+
+    #[test]
+    fn fails_closed_when_asset_or_checksum_is_missing() {
+        let missing_asset = json!({"assets": []});
+        assert!(
+            resolve_release_asset(&missing_asset, "v0.2.2", "kite-linux-x86_64.tar.gz").is_err()
+        );
+
+        let missing_checksum = json!({
+            "assets": [{
+                "name": "kite-linux-x86_64.tar.gz",
+                "download_url": "https://downloads.example/releases/v0.2.2/kite-linux-x86_64.tar.gz"
+            }]
+        });
+        assert!(
+            resolve_release_asset(&missing_checksum, "v0.2.2", "kite-linux-x86_64.tar.gz").is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_mutable_or_insecure_asset_urls() {
+        for url in [
+            "https://downloads.example/releases/latest/kite-linux-x86_64.tar.gz",
+            "http://downloads.example/releases/v0.2.2/kite-linux-x86_64.tar.gz",
+        ] {
+            let manifest = json!({
+                "assets": [{
+                    "name": "kite-linux-x86_64.tar.gz",
+                    "sha256": "2ec5a95dc4a9bc70ec73de02d375ceb2adc6d05dbabd9d0a3aeb5feb6bd40692",
+                    "download_url": url
+                }]
+            });
+            assert!(
+                resolve_release_asset(&manifest, "v0.2.2", "kite-linux-x86_64.tar.gz").is_err()
+            );
+        }
     }
 }

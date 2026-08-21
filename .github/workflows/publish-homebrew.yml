@@ -1,30 +1,62 @@
-name: Publish Homebrew formula
+name: Prepare Homebrew formula PR
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Release tag to publish (e.g. v0.1.5)'
-        required: true
 
-permissions:
-  contents: read
+run-name: Prepare Homebrew formula for ${{ github.ref_name }}
+
+permissions: {}
+
+env:
+  LINUX_GLIBC_FLOOR: "2.34"
+
+concurrency:
+  group: homebrew-formula-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   update-formula:
     runs-on: blacksmith-2vcpu-ubuntu-2204
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: read
     steps:
+      - name: Check out the tagged CLI source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Resolve release tag
         id: tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [ -n "${{ github.event.inputs.tag || '' }}" ]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
-          fi
+          [[ "$GITHUB_REF_TYPE" == "tag" ]] || {
+            echo "::error::Dispatch this workflow from an existing v* tag."
+            exit 1
+          }
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::Release tag must be clean semver vX.Y.Z."
+            exit 1
+          }
+          git fetch --force --tags origin
+          source_sha="$(git rev-list -n1 "refs/tags/${RELEASE_TAG}^{commit}" 2>/dev/null || true)"
+          [[ -n "$source_sha" ]] || {
+            echo "::error::Release tag does not exist."
+            exit 1
+          }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$source_sha" origin/main || {
+            echo "::error::Release tag is not reachable from origin/main."
+            exit 1
+          }
+          git checkout --detach "$source_sha"
+          python3 scripts/validate-release.py --tag "$RELEASE_TAG"
+          printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
 
       - name: Fetch release manifest from R2
         id: manifest
@@ -45,7 +77,10 @@ jobs:
             echo "::error::failed to fetch manifest for ${RELEASE_TAG}"
             exit 1
           fi
-          jq . manifest.json
+          python3 scripts/validate-release.py \
+            --tag "$RELEASE_TAG" \
+            --source-sha "${{ steps.tag.outputs.source_sha }}" \
+            --manifest manifest.json
           darwin_url="$(jq -r '.assets[] | select(.name == "kite-darwin-arm64.tar.gz") | .download_url' manifest.json)"
           darwin_sha="$(jq -r '.assets[] | select(.name == "kite-darwin-arm64.tar.gz") | .sha256'       manifest.json)"
           linux_url="$(jq -r '.assets[] | select(.name == "kite-linux-x86_64.tar.gz")  | .download_url' manifest.json)"
@@ -58,7 +93,7 @@ jobs:
           echo "linux_sha=${linux_sha}"   >> "$GITHUB_OUTPUT"
 
       - name: Check out homebrew-kite
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: Alpha-Centauri-Cyberspace/homebrew-kite
           token: ${{ secrets.HOMEBREW_TAP_BOT_TOKEN }}
@@ -76,7 +111,7 @@ jobs:
           mkdir -p homebrew-kite/Formula
           cat > homebrew-kite/Formula/kite.rb <<RUBY
           class Kite < Formula
-            desc "Universal webhook adapter CLI"
+            desc "Event delivery CLI for developers and AI agents"
             homepage "https://github.com/Alpha-Centauri-Cyberspace/kite-cli"
             version "${VERSION}"
             license "MIT"
@@ -96,28 +131,59 @@ jobs:
             end
 
             def install
+              if OS.linux? && OS::Linux::Glibc.system_version < Version.new("${LINUX_GLIBC_FLOOR}")
+                odie "Kite requires glibc ${LINUX_GLIBC_FLOOR} or newer on Linux."
+              end
               bin.install "kite"
             end
 
             test do
-              assert_match "kite", shell_output("#{bin}/kite --version")
+              assert_match version.to_s, shell_output("#{bin}/kite --version")
             end
           end
           RUBY
-          cat homebrew-kite/Formula/kite.rb
 
-      - name: Commit and push formula update
+      - name: Validate, commit, and open a formula pull request
         env:
           RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_BOT_TOKEN }}
         run: |
           set -euo pipefail
           cd homebrew-kite
+          cp Formula/kite.rb "${RUNNER_TEMP}/kite.rb"
+          ruby -c Formula/kite.rb
           git config user.name  "kite-release-bot"
           git config user.email "kite-release-bot@users.noreply.github.com"
-          if git diff --quiet Formula/kite.rb; then
-            echo "No formula changes; nothing to commit."
-            exit 0
+          branch="release/kite-${RELEASE_TAG}"
+          if git fetch origin "$branch" 2>/dev/null; then
+            git checkout -B "$branch" FETCH_HEAD
+          else
+            git checkout -b "$branch"
           fi
-          git add Formula/kite.rb
-          git commit -m "kite ${RELEASE_TAG}"
-          git push origin HEAD
+          cp "${RUNNER_TEMP}/kite.rb" Formula/kite.rb
+          existing="$(gh pr list --repo Alpha-Centauri-Cyberspace/homebrew-kite --head "$branch" --state open --json url --jq '.[0].url // empty')"
+          if git diff --quiet Formula/kite.rb; then
+            if [ -n "$existing" ]; then
+              echo "Formula PR already open: $existing"
+              exit 0
+            elif git diff --quiet origin/main -- Formula/kite.rb; then
+              echo "Formula already matches ${RELEASE_TAG}; no PR needed."
+              exit 0
+            else
+              echo "Formula branch already contains ${RELEASE_TAG}; opening a replacement PR."
+            fi
+          else
+            git add Formula/kite.rb
+            git commit -m "chore: update Kite to ${RELEASE_TAG}"
+            git push origin "$branch"
+          fi
+          if [ -n "$existing" ]; then
+            echo "Formula PR already open: $existing"
+          else
+            gh pr create \
+              --repo Alpha-Centauri-Cyberspace/homebrew-kite \
+              --head "$branch" \
+              --base main \
+              --title "chore: update Kite to ${RELEASE_TAG}" \
+              --body "Updates the formula from the validated immutable manifest for [Kite CLI ${RELEASE_TAG}](https://github.com/Alpha-Centauri-Cyberspace/kite-cli/releases/tag/${RELEASE_TAG})."
+          fi
