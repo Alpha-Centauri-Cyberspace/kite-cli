@@ -3,6 +3,7 @@
 use anyhow::{Result, anyhow};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -66,7 +67,7 @@ pub fn derive_http_base(ws_url: &str) -> String {
 }
 
 impl KiteConfig {
-    /// Load config from ~/.config/kite/config.toml
+    /// Load config from `KITE_CONFIG` when set, otherwise the platform default.
     pub fn load() -> Result<Self> {
         let path = config_path();
         if path.exists() {
@@ -78,7 +79,7 @@ impl KiteConfig {
         }
     }
 
-    /// Save config to ~/.config/kite/config.toml
+    /// Save to `KITE_CONFIG` when set, otherwise the platform default.
     pub fn save(&self) -> Result<()> {
         let path = config_path();
         if let Some(parent) = path.parent() {
@@ -143,8 +144,16 @@ impl KiteConfig {
     }
 }
 
-/// Get the config file path.
+/// Get the config file path, honoring `KITE_CONFIG` when it is non-empty.
 pub fn config_path() -> PathBuf {
+    config_path_from_override(std::env::var_os("KITE_CONFIG"))
+}
+
+fn config_path_from_override(override_path: Option<OsString>) -> PathBuf {
+    if let Some(path) = override_path.filter(|path| !path.is_empty()) {
+        return PathBuf::from(path);
+    }
+
     if let Some(proj_dirs) = ProjectDirs::from("dev", "kite", "kite") {
         proj_dirs.config_dir().join("config.toml")
     } else {
@@ -201,6 +210,54 @@ fn derive_hook_base_url(ws_url: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_config_path_override_wins() {
+        let directory = tempfile::tempdir().expect("temporary config directory");
+        let override_path = directory.path().join("config.toml");
+
+        assert_eq!(
+            config_path_from_override(Some(override_path.clone().into_os_string())),
+            override_path
+        );
+    }
+
+    #[test]
+    fn empty_config_path_override_uses_platform_default() {
+        assert_eq!(
+            config_path_from_override(Some(OsString::new())),
+            config_path_from_override(None)
+        );
+    }
+
+    #[test]
+    fn config_path_reads_kite_config_in_an_isolated_process() {
+        let directory = tempfile::tempdir().expect("temporary config directory");
+        let override_path = directory.path().join("agent-config.toml");
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "config::tests::config_path_subprocess_helper",
+                "--nocapture",
+            ])
+            .env("KITE_CONFIG_TEST_CHILD", "1")
+            .env("KITE_CONFIG_EXPECTED", &override_path)
+            .env("KITE_CONFIG", &override_path)
+            .status()
+            .expect("run isolated config-path test");
+
+        assert!(status.success(), "isolated config-path test failed");
+    }
+
+    #[test]
+    fn config_path_subprocess_helper() {
+        if std::env::var_os("KITE_CONFIG_TEST_CHILD").is_none() {
+            return;
+        }
+
+        let expected = std::env::var_os("KITE_CONFIG_EXPECTED").expect("expected config path");
+        assert_eq!(config_path(), PathBuf::from(expected));
+    }
 
     #[test]
     fn test_derive_http_base_wss_with_ws_suffix() {
