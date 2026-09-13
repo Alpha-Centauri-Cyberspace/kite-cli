@@ -14,25 +14,50 @@ brew tap alpha-centauri-cyberspace/kite
 brew install kite
 ```
 
-### Cargo
+Homebrew packages are currently available for macOS on Apple Silicon and Linux
+on x86_64 with glibc 2.34 or newer.
+
+### Prebuilt binary
+
+Download the archive and matching `.sha256` file for the latest release from
+[GitHub Releases](https://github.com/Alpha-Centauri-Cyberspace/kite-cli/releases/latest):
+
+| Platform | Release asset |
+|---|---|
+| macOS, Apple Silicon (`arm64`) | `kite-darwin-arm64.tar.gz` |
+| Linux, x86_64 (glibc 2.34+) | `kite-linux-x86_64.tar.gz` |
+
+Verify the checksum before extracting the archive. For example, on Linux x86_64:
 
 ```bash
-cargo install kite-cli
+curl -fLO https://github.com/Alpha-Centauri-Cyberspace/kite-cli/releases/latest/download/kite-linux-x86_64.tar.gz
+curl -fLO https://github.com/Alpha-Centauri-Cyberspace/kite-cli/releases/latest/download/kite-linux-x86_64.tar.gz.sha256
+sha256sum --check kite-linux-x86_64.tar.gz.sha256
+tar -xzf kite-linux-x86_64.tar.gz
+sudo install -m 0755 kite /usr/local/bin/kite
 ```
 
-### Docker
-
-```bash
-docker pull ghcr.io/alpha-centauri-cyberspace/kite-cli:latest
-```
+> [!IMPORTANT]
+> Kite does not publish this CLI to crates.io or as a public container image.
+> The crates.io package named `kite-cli` is an unrelated project. Use Homebrew,
+> a verified GitHub release asset, or build this repository from source.
 
 ### From source
+
+The repository pins Rust in `rust-toolchain.toml`; `cargo`/`rustup` will select that toolchain automatically.
 
 ```bash
 git clone https://github.com/Alpha-Centauri-Cyberspace/kite-cli
 cd kite-cli
-cargo build --release
+cargo build --locked --release
 ./target/release/kite --help
+```
+
+The checked-in `Dockerfile` is only a convenience for building this source tree locally. It uses the same pinned Rust toolchain and is not published to a container registry:
+
+```bash
+docker build -t kite-cli-source .
+docker run --rm kite-cli-source --help
 ```
 
 ## Quick start

@@ -4,6 +4,10 @@
 # Node
 node_modules/
 
+# Python release tooling
+__pycache__/
+*.py[cod]
+
 # Generated types
 packages/kite-types/generated/
 

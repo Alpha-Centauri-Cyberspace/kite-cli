@@ -18,13 +18,30 @@ The wire format lives in [`kite-protocol`](https://github.com/Alpha-Centauri-Cyb
 
 ## Releases
 
-`main` pushes that touch `src/**`, `Cargo.toml`, or `Cargo.lock` trigger `auto-release.yml`, which:
+The crate version in `Cargo.toml` is the release source of truth. The package is
+marked `publish = false` because the crates.io name belongs to an unrelated
+project; Kite CLI releases only through GitHub Releases, the download mirror,
+and Homebrew.
 
-1. Tags the next `v0.1.x`.
-2. Builds darwin-arm64 + linux-x86_64 release tarballs.
-3. Publishes a GitHub Release with the tarballs attached.
-4. Uploads the tarballs, SHA256s, and a `manifest.json` to Cloudflare R2.
-5. Triggers `publish-homebrew.yml`, which updates `Formula/kite.rb` in [`homebrew-kite`](https://github.com/Alpha-Centauri-Cyberspace/homebrew-kite).
+A maintainer first merges a reviewed version bump, creates a protected `vX.Y.Z`
+tag on that merged commit, and manually dispatches `auto-release.yml` with that
+tag selected as the workflow ref. The approval-gated workflow:
+
+1. Validates that `Cargo.toml`, `Cargo.lock`, and the `vX.Y.Z` tag agree.
+2. Confirms the tag is reachable from `main` and builds that exact source.
+3. Builds only the supported darwin-arm64 and linux-x86_64 release tarballs.
+4. Validates and uploads immutable archives and a versioned manifest.
+5. Publishes a GitHub Release with the tarballs and SHA256 sidecars attached.
+6. Advances the `latest.json`
+   pointer to Cloudflare R2.
+7. Allows a separate, approval-gated `publish-homebrew.yml` run to validate the
+   versioned manifest and open a `Formula/kite.rb` pull request in
+   [`homebrew-kite`](https://github.com/Alpha-Centauri-Cyberspace/homebrew-kite).
+
+Both release workflows must be dispatched with the existing tag selected as the
+workflow ref. The tag's version must match the checked-in package metadata; the
+workflows never create tags, invent versions, or push directly to the Homebrew
+tap's default branch.
 
 ## Filing issues
 
